@@ -15,7 +15,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.1.1';
+const APP_VERSION = '0.1.2';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
   'FACTION',
@@ -92,11 +92,12 @@ const RAW_MATERIAL_START = 'Arco';
 const RAW_MATERIAL_END = 'Titanium Ore';
 const COMPONENT_START = 'Ammo';
 const COMPONENT_END = 'Toolkits';
-const SHIP_START = 'Busan Pulse';
-const SHIP_END = 'Rainbow Phi';
-const SHIP_PARTS_START = 'Fimbul Airbike (ship parts)';
-const SHIP_PARTS_END = 'Rainbow Phi (ship parts)';
-const ASSET_RULE_GROUPS = new Set(['raw', 'components', 'ships', 'ship-parts']);
+const ASSET_RULE_GROUPS = new Set(['raw', 'components']);
+const STARBASES_BY_FACTION = {
+  MUD: ['MUD-1', 'MUD-2', 'MUD-3', 'MUD-4', 'MUD-5', 'MRZ-1', 'MRZ-2', 'MRZ-3', 'MRZ-4', 'MRZ-5', 'MRZ-6', 'MRZ-7', 'MRZ-8', 'MRZ-9', 'MRZ-10', 'MRZ-11', 'MRZ-12'],
+  ONI: ['ONI-1', 'ONI-2', 'ONI-3', 'ONI-4', 'ONI-5', 'MRZ-13', 'MRZ-14', 'MRZ-18', 'MRZ-19', 'MRZ-20', 'MRZ-24', 'MRZ-25', 'MRZ-26', 'MRZ-29', 'MRZ-30', 'MRZ-31', 'MRZ-36'],
+  USTUR: ['UST-1', 'UST-2', 'UST-3', 'UST-4', 'UST-5', 'MRZ-15', 'MRZ-16', 'MRZ-17', 'MRZ-21', 'MRZ-22', 'MRZ-23', 'MRZ-27', 'MRZ-28', 'MRZ-32', 'MRZ-33', 'MRZ-34', 'MRZ-35'],
+};
 
 function shortKey(value) {
   const text = String(value ?? '').trim();
@@ -252,6 +253,10 @@ function getAllResourceOptions() {
   return parseResources(assetRegistryResourceList);
 }
 
+function getAssetLabel(asset) {
+  return getAllResourceOptions().find((option) => option.value === asset)?.label ?? '';
+}
+
 function sliceOptionsByNameRange(options, startName, endName) {
   const startIndex = options.findIndex((option) => option.label === startName);
   const endIndex = options.findIndex((option) => option.label === endName);
@@ -263,12 +268,6 @@ function sliceOptionsByNameRange(options, startName, endName) {
 
 function getResourceOptions(group = activeAssetRuleGroup) {
   const options = getAllResourceOptions();
-  if (group === 'ships') {
-    return sliceOptionsByNameRange(options, SHIP_START, SHIP_END);
-  }
-  if (group === 'ship-parts') {
-    return sliceOptionsByNameRange(options, SHIP_PARTS_START, SHIP_PARTS_END);
-  }
   if (group === 'components') {
     return sliceOptionsByNameRange(options, COMPONENT_START, COMPONENT_END);
   }
@@ -276,19 +275,51 @@ function getResourceOptions(group = activeAssetRuleGroup) {
 }
 
 function getAssetRuleGroupForAsset(asset) {
-  const shipParts = new Set(getResourceOptions('ship-parts').map((option) => option.value));
-  if (shipParts.has(asset)) {
-    return 'ship-parts';
-  }
-  const ships = new Set(getResourceOptions('ships').map((option) => option.value));
-  if (ships.has(asset)) {
-    return 'ships';
-  }
   const components = new Set(getResourceOptions('components').map((option) => option.value));
   if (components.has(asset)) {
     return 'components';
   }
   return 'raw';
+}
+
+function getSelectedFaction() {
+  const value = String(form?.elements?.namedItem('FACTION')?.value ?? '').trim();
+  return Object.prototype.hasOwnProperty.call(STARBASES_BY_FACTION, value) ? value : 'ONI';
+}
+
+function normalizeStarbaseValue(value) {
+  return String(value ?? '').trim().replace(/_/g, '-').toUpperCase();
+}
+
+function getStarbaseOptionsForFaction(faction = getSelectedFaction()) {
+  return STARBASES_BY_FACTION[faction] ?? STARBASES_BY_FACTION.ONI;
+}
+
+function getStarbaseRank(starbase, faction = getSelectedFaction()) {
+  const normalized = normalizeStarbaseValue(starbase);
+  const list = getStarbaseOptionsForFaction(faction);
+  const index = list.indexOf(normalized);
+  if (index >= 0) {
+    return index;
+  }
+
+  const match = normalized.match(/^([A-Z]+)-(\d+)$/);
+  if (!match) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  const [, prefix, rawNumber] = match;
+  const zoneRank = prefix === faction || (faction === 'USTUR' && prefix === 'UST') ? 1000 : prefix === 'MRZ' ? 2000 : 3000;
+  return zoneRank + Number(rawNumber);
+}
+
+function compareStarbaseLabels(a, b) {
+  const rankA = getStarbaseRank(a);
+  const rankB = getStarbaseRank(b);
+  if (rankA !== rankB) {
+    return rankA - rankB;
+  }
+  return normalizeStarbaseValue(a).localeCompare(normalizeStarbaseValue(b), undefined, { numeric: true });
 }
 
 function getAssetRuleGroupForRow(row) {
@@ -300,63 +331,44 @@ function getAssetRuleGroupForRow(row) {
 }
 
 function buildDefaultAssetRuleRows(group = null) {
-  const groups = group && ASSET_RULE_GROUPS.has(group) ? [group] : ['raw', 'components', 'ships', 'ship-parts'];
-  return groups.flatMap((nextGroup) =>
-    getResourceOptions(nextGroup).map((resource) => ({
-      group: nextGroup,
-      asset: resource.value,
-      side: 'sell',
-      quantity: '',
-      limit: '',
-      price: '',
-    })),
-  );
+  return [];
 }
 
 function ensureAssetRuleRows() {
-  if (!assetRuleRows.length) {
-    assetRuleRows = buildDefaultAssetRuleRows();
-  }
+  assetRuleRows = normalizeAssetRuleRows(assetRuleRows);
 }
 
 function syncRowsWithResources() {
-  if (!assetRuleRows.length) {
-    assetRuleRows = buildDefaultAssetRuleRows();
-    return;
-  }
-
   assetRuleRows = normalizeAssetRuleRows(assetRuleRows);
 }
 
 function normalizeAssetRuleRows(rows) {
-  const options = getAllResourceOptions();
-  const validValues = new Set(options.map((option) => option.value));
+  const starbaseOptions = getStarbaseOptionsForFaction();
+  const validStarbases = new Set(starbaseOptions);
+  const fallbackStarbase = starbaseOptions[0] ?? '';
 
-  return (Array.isArray(rows) ? rows : []).map((row, index) => {
+  return (Array.isArray(rows) ? rows : []).map((row) => {
     const group = getAssetRuleGroupForRow(row);
-    const asset = String(row?.asset ?? '').trim();
-    if (validValues.has(asset)) {
-      return {
-        group,
-        asset,
-        side: row?.side === 'buy' ? 'buy' : 'sell',
-        quantity: String(row?.quantity ?? '').trim(),
-        limit: String(row?.limit ?? '').trim(),
-        price: String(row?.price ?? '').trim(),
-      };
-    }
-
     const groupOptions = getResourceOptions(group);
-    const fallbackOptions = groupOptions.length ? groupOptions : options;
-    const fallbackAsset = fallbackOptions[index]?.value ?? fallbackOptions[0]?.value ?? options[0]?.value ?? '';
-    return {
+    const validValues = new Set(groupOptions.map((option) => option.value));
+    const asset = String(row?.asset ?? '').trim();
+    const starbase = normalizeStarbaseValue(row?.starbase);
+    const normalizedStarbase = validStarbases.has(starbase) ? starbase : fallbackStarbase;
+    const normalized = {
+      starbase: normalizedStarbase,
       group,
-      asset: fallbackAsset,
+      asset: validValues.has(asset) ? asset : '',
       side: row?.side === 'buy' ? 'buy' : 'sell',
       quantity: String(row?.quantity ?? '').trim(),
       limit: String(row?.limit ?? '').trim(),
       price: String(row?.price ?? '').trim(),
     };
+
+    if (validValues.has(asset)) {
+      return normalized;
+    }
+
+    return normalized;
   });
 }
 
@@ -377,50 +389,60 @@ function updateRuleHint(rowElement, side) {
 
 function renderAssetRuleRows() {
   syncRowsWithResources();
-  const isShipMarket = activeAssetRuleGroup === 'ships' || activeAssetRuleGroup === 'ship-parts';
   if (assetRulePriceHeader) {
-    assetRulePriceHeader.textContent = isShipMarket ? 'Price (USDC)' : 'Price (ATLAS)';
+    assetRulePriceHeader.textContent = 'Price (ATLAS)';
   }
   const allOptions = getAllResourceOptions();
   const options = getResourceOptions(activeAssetRuleGroup);
+  const starbaseOptions = getStarbaseOptionsForFaction();
   const visibleRows = assetRuleRows
     .map((row, index) => ({ row, index }))
-    .filter(({ row }) => getAssetRuleGroupForRow(row) === activeAssetRuleGroup);
+    .filter(({ row }) => getAssetRuleGroupForRow(row) === activeAssetRuleGroup)
+    .sort((a, b) => {
+      const starbaseComparison = compareStarbaseLabels(a.row.starbase, b.row.starbase);
+      if (starbaseComparison !== 0) {
+        return starbaseComparison;
+      }
+      const assetA = getAssetLabel(a.row.asset) || a.row.asset || '';
+      const assetB = getAssetLabel(b.row.asset) || b.row.asset || '';
+      return assetA.localeCompare(assetB, undefined, { numeric: true });
+    });
 
   const rulesTable = assetRulesBody.closest('table');
   if (rulesTable) {
-    rulesTable.classList.toggle('ships-rules-table', isShipMarket);
+    rulesTable.classList.remove('ships-rules-table');
   }
 
   assetRulesBody.innerHTML = '';
-  addRuleRowBtn.disabled = options.length === 0;
+  addRuleRowBtn.disabled = options.length === 0 || starbaseOptions.length === 0;
 
   if (!allOptions.length) {
-    assetRulesBody.innerHTML = '<tr><td colspan="6" class="empty-state">Asset registry unavailable. Save a valid Aephia API Key in Settings to load the managed asset list.</td></tr>';
+    assetRulesBody.innerHTML = '<tr><td colspan="7" class="empty-state">Asset registry unavailable. Save a valid Aephia API Key in Settings to load the managed asset list.</td></tr>';
     return;
   }
 
   if (!options.length) {
-    assetRulesBody.innerHTML = '<tr><td colspan="6" class="empty-state">No assets available for this group.</td></tr>';
+    assetRulesBody.innerHTML = '<tr><td colspan="7" class="empty-state">No assets available for this group.</td></tr>';
+    return;
+  }
+
+  if (!starbaseOptions.length) {
+    assetRulesBody.innerHTML = '<tr><td colspan="7" class="empty-state">No starbases configured for this faction.</td></tr>';
     return;
   }
 
   if (!visibleRows.length) {
-    const groupLabel =
-      activeAssetRuleGroup === 'ships'
-        ? 'ship'
-        : activeAssetRuleGroup === 'ship-parts'
-          ? 'ship part'
-          : activeAssetRuleGroup === 'components'
-            ? 'component'
-            : 'raw material';
-    assetRulesBody.innerHTML = `<tr><td colspan="6" class="empty-state">No ${groupLabel} rules yet. Use + Add Row.</td></tr>`;
+    const groupLabel = activeAssetRuleGroup === 'components' ? 'component' : 'raw material';
+    assetRulesBody.innerHTML = `<tr><td colspan="7" class="empty-state">No ${groupLabel} rules yet. Use + Add Row.</td></tr>`;
     return;
   }
 
   visibleRows.forEach(({ row, index }) => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
+      <td>
+        <select data-index="${index}" data-field="starbase"></select>
+      </td>
       <td>
         <select data-index="${index}" data-field="asset"></select>
       </td>
@@ -456,12 +478,25 @@ function renderAssetRuleRows() {
       </td>
     `;
 
+    const starbaseSelect = tr.querySelector('[data-field="starbase"]');
     const assetSelect = tr.querySelector('[data-field="asset"]');
     const sideSelect = tr.querySelector('[data-field="side"]');
     const quantityInput = tr.querySelector('[data-field="quantity"]');
     const limitInput = tr.querySelector('[data-field="limit"]');
     const priceInput = tr.querySelector('[data-field="price"]');
     const cancelOrderBtn = tr.querySelector('.cancel-order-btn');
+
+    for (const starbase of starbaseOptions) {
+      const opt = document.createElement('option');
+      opt.value = starbase;
+      opt.textContent = starbase;
+      starbaseSelect.appendChild(opt);
+    }
+
+    const emptyAssetOption = document.createElement('option');
+    emptyAssetOption.value = '';
+    emptyAssetOption.textContent = 'Select asset...';
+    assetSelect.appendChild(emptyAssetOption);
 
     for (const option of options) {
       const opt = document.createElement('option');
@@ -470,15 +505,22 @@ function renderAssetRuleRows() {
       assetSelect.appendChild(opt);
     }
 
-    assetSelect.value = options.some((option) => option.value === row.asset) ? row.asset : options[0].value;
+    starbaseSelect.value = starbaseOptions.includes(row.starbase) ? row.starbase : starbaseOptions[0];
+    assetSelect.value = options.some((option) => option.value === row.asset) ? row.asset : '';
     sideSelect.value = row.side === 'buy' ? 'buy' : 'sell';
     quantityInput.value = row.quantity ?? '';
     limitInput.value = row.limit ?? '';
     priceInput.value = row.price ?? '';
     updateRuleHint(tr, sideSelect.value);
 
+    starbaseSelect.addEventListener('change', (event) => {
+      assetRuleRows[index].starbase = event.target.value;
+      renderAssetRuleRows();
+    });
+
     assetSelect.addEventListener('change', (event) => {
       assetRuleRows[index].asset = event.target.value;
+      renderAssetRuleRows();
     });
 
     sideSelect.addEventListener('change', (event) => {
@@ -501,8 +543,14 @@ function renderAssetRuleRows() {
     cancelOrderBtn.addEventListener('click', async () => {
       const rowSnapshot = {
         asset: assetRuleRows[index]?.asset ?? '',
+        starbase: assetRuleRows[index]?.starbase ?? '',
         side: assetRuleRows[index]?.side === 'buy' ? 'buy' : 'sell',
       };
+
+      if (!rowSnapshot.asset) {
+        appendLog(`[${new Date().toISOString()}] [WARN] Select an asset before cancelling an order.`);
+        return;
+      }
 
       cancelOrderBtn.disabled = true;
       try {
@@ -519,9 +567,6 @@ function renderAssetRuleRows() {
 
     tr.querySelector('.remove-row-btn').addEventListener('click', () => {
       assetRuleRows.splice(index, 1);
-      if (!assetRuleRows.length) {
-        assetRuleRows = buildDefaultAssetRuleRows(activeAssetRuleGroup).slice(0, 1);
-      }
       renderAssetRuleRows();
     });
 
@@ -994,6 +1039,7 @@ function stopStatusPolling() {
 function normalizeAssetRulesForDiff(rows) {
   return (Array.isArray(rows) ? rows : [])
     .map((row) => ({
+      starbase: normalizeStarbaseValue(row?.starbase),
       group: String(row?.group ?? '').trim(),
       asset: String(row?.asset ?? '').trim(),
       side: row?.side === 'buy' ? 'buy' : 'sell',
@@ -1002,22 +1048,28 @@ function normalizeAssetRulesForDiff(rows) {
       price: String(row?.price ?? '').trim(),
     }))
     .filter((row) => row.asset)
-    .sort((a, b) => `${a.group}|${a.asset}|${a.side}`.localeCompare(`${b.group}|${b.asset}|${b.side}`));
+    .sort((a, b) => {
+      const starbaseComparison = compareStarbaseLabels(a.starbase, b.starbase);
+      if (starbaseComparison !== 0) {
+        return starbaseComparison;
+      }
+      return `${a.group}|${a.asset}|${a.side}`.localeCompare(`${b.group}|${b.asset}|${b.side}`);
+    });
 }
 
 function getChangedAssets(previousRows, nextRows) {
   const prevMap = new Map(
-    normalizeAssetRulesForDiff(previousRows).map((row) => [`${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
+    normalizeAssetRulesForDiff(previousRows).map((row) => [`${row.starbase}|${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
   );
   const nextMap = new Map(
-    normalizeAssetRulesForDiff(nextRows).map((row) => [`${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
+    normalizeAssetRulesForDiff(nextRows).map((row) => [`${row.starbase}|${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
   );
 
   const touched = new Set();
   const keys = new Set([...prevMap.keys(), ...nextMap.keys()]);
   for (const key of keys) {
     if (prevMap.get(key) !== nextMap.get(key)) {
-      touched.add(key.split('|')[1]);
+      touched.add(key.split('|')[2]);
     }
   }
   return Array.from(touched);
@@ -1062,7 +1114,7 @@ async function saveAllSettings() {
 async function boot() {
   const state = await window.botApi.getSettings();
   writeFormConfig(state.config);
-  assetRuleRows = Array.isArray(state.assetRules) && state.assetRules.length ? normalizeAssetRuleRows(state.assetRules) : buildDefaultAssetRuleRows();
+  assetRuleRows = Array.isArray(state.assetRules) ? normalizeAssetRuleRows(state.assetRules) : buildDefaultAssetRuleRows();
   ensureAssetRuleRows();
   renderAssetRuleRows();
   lastSavedConfig = { ...(state.config || {}) };
@@ -1200,14 +1252,15 @@ updateConfirmBtn.addEventListener('click', async () => {
 });
 
 addRuleRowBtn.addEventListener('click', () => {
-  const firstOption = getResourceOptions(activeAssetRuleGroup)[0];
-  if (!firstOption) {
+  const firstStarbase = getStarbaseOptionsForFaction()[0];
+  if (!getResourceOptions(activeAssetRuleGroup).length || !firstStarbase) {
     appendLog(`[${new Date().toISOString()}] [WARN] Asset registry unavailable. Save a valid Aephia API Key first.`);
     return;
   }
   assetRuleRows.push({
+    starbase: firstStarbase,
     group: activeAssetRuleGroup,
-    asset: firstOption.value,
+    asset: '',
     side: 'sell',
     quantity: '',
     limit: '',
@@ -1226,6 +1279,11 @@ for (const key of ['HOT_WALLET_SECRET', 'OWNER_WALLET', 'OWNER_PROFILE']) {
   });
 }
 
+form.elements.namedItem('FACTION')?.addEventListener('change', () => {
+  assetRuleRows = normalizeAssetRuleRows(assetRuleRows);
+  renderAssetRuleRows();
+});
+
 for (const button of tabButtons) {
   button.addEventListener('click', () => {
     setActiveTab(button.dataset.tab);
@@ -1234,7 +1292,7 @@ for (const button of tabButtons) {
 
 for (const button of assetRuleTabButtons) {
   button.addEventListener('click', () => {
-    activeAssetRuleGroup = ['components', 'ships', 'ship-parts'].includes(button.dataset.assetRuleGroup)
+    activeAssetRuleGroup = button.dataset.assetRuleGroup === 'components'
       ? button.dataset.assetRuleGroup
       : 'raw';
     for (const tabButton of assetRuleTabButtons) {

@@ -156,6 +156,7 @@ function createFailoverConnection(
 export type AssetRuleSide = 'buy' | 'sell';
 
 export type AssetRuleInput = {
+  starbase?: string | null;
   asset?: string | null;
   group?: string | null;
   side?: string | null;
@@ -165,6 +166,7 @@ export type AssetRuleInput = {
 };
 
 export type AssetRuleConfig = {
+  starbase: string;
   asset: string;
   group: AssetRegistryGroup;
   side: AssetRuleSide;
@@ -501,12 +503,15 @@ export function parseAssetRules(input?: AssetRuleInput[] | null): AssetRuleConfi
     return [];
   }
 
-  return input.map((rule, index) => parseAssetRule(rule, index));
+  return input
+    .filter((rule) => String(rule?.asset ?? '').trim())
+    .map((rule, index) => parseAssetRule(rule, index));
 }
 
 export function parseAssetRule(input: AssetRuleInput, index?: number): AssetRuleConfig {
   const label = typeof index === 'number' ? 'assetRules[' + index + ']' : 'assetRule';
 
+  const starbase = parseNonEmptyString(input.starbase, label + '.starbase');
   const asset = parseNonEmptyString(input.asset, label + '.asset');
   const group = normalizeAssetRuleGroup(input.group, asset);
   const side = parseAssetRuleSide(input.side, label + '.side');
@@ -515,6 +520,7 @@ export function parseAssetRule(input: AssetRuleInput, index?: number): AssetRule
   const price = parseRulePrice(input.price, label + '.price');
 
   return {
+    starbase,
     asset,
     group,
     side,

@@ -35,12 +35,6 @@
                   <button class="asset-rule-tab" id="tab-components" type="button" data-asset-rule-group="components" role="tab" aria-selected="false">
                     Components etc.
                   </button>
-                  <button class="asset-rule-tab" id="tab-ships" type="button" data-asset-rule-group="ships" role="tab" aria-selected="false">
-                    Ships
-                  </button>
-                  <button class="asset-rule-tab" id="tab-ship-parts" type="button" data-asset-rule-group="ship-parts" role="tab" aria-selected="false">
-                    Ship Parts
-                  </button>
                 </div>
 
                 <div class="rules-table-scroll">
@@ -48,6 +42,7 @@
                     <table class="rules-table">
                       <thead>
                         <tr>
+                          <th>Starbase</th>
                           <th>Asset</th>
                           <th>Side</th>
                           <th>Quantity</th>
@@ -59,7 +54,7 @@
                       <tbody id="asset-rules-body"></tbody>
                       <tfoot>
                         <tr>
-                          <td colspan="5"></td>
+                          <td colspan="6"></td>
                           <td class="remove-cell add-row-cell">
                             <button id="add-rule-row-btn" type="button">+ Add Row</button>
                           </td>
@@ -245,7 +240,7 @@
         <h2 id="update-dialog-title">LM Market Bot Update</h2>
         <div class="update-version-grid">
           <span>Current version</span>
-          <strong id="update-current-version">v0.1.1</strong>
+          <strong id="update-current-version">v0.1.2</strong>
           <span>Latest GitHub version</span>
           <strong id="update-latest-version">Checking...</strong>
         </div>

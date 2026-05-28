@@ -328,6 +328,7 @@ function normalizeAssetRules(rows) {
     return [];
   }
   return rows.map((row) => ({
+    starbase: String(row?.starbase ?? ''),
     asset: String(row?.asset ?? ''),
     side: row?.side === 'buy' ? 'buy' : 'sell',
     quantity: String(row?.quantity ?? ''),
