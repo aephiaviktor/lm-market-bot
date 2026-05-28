@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LM Market Bot</title>
+    <link rel="stylesheet" href="./renderer.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <main class="app-main">
+        <div class="app">
+          <div class="app-header">
+            <h1>LM Market Bot</h1>
+            <span class="running-pill stopped" id="running-pill">Stopped</span>
+          </div>
+
+          <section class="panel app-panel">
+            <div class="tabs compact-tabs" role="tablist" aria-label="Configuration tabs">
+              <button class="tab-button" id="tab-setup" type="button" data-tab="setup" role="tab" aria-selected="false">
+                Settings
+              </button>
+            </div>
+
+            <form id="config-form" class="config-shell sensitive-hidden">
+              <section class="tab-panel active" data-panel="asset-rules" role="tabpanel" aria-label="Asset Rules">
+                <div class="panel-toolbar">
+                  <h2>Asset Rules</h2>
+                </div>
+
+                <div class="asset-rule-tabs" role="tablist" aria-label="Asset rule groups">
+                  <button class="asset-rule-tab active" id="tab-raw-materials" type="button" data-asset-rule-group="raw" role="tab" aria-selected="true">
+                    Raw Materials
+                  </button>
+                  <button class="asset-rule-tab" id="tab-components" type="button" data-asset-rule-group="components" role="tab" aria-selected="false">
+                    Components etc.
+                  </button>
+                  <button class="asset-rule-tab" id="tab-ships" type="button" data-asset-rule-group="ships" role="tab" aria-selected="false">
+                    Ships
+                  </button>
+                  <button class="asset-rule-tab" id="tab-ship-parts" type="button" data-asset-rule-group="ship-parts" role="tab" aria-selected="false">
+                    Ship Parts
+                  </button>
+                </div>
+
+                <div class="rules-table-scroll">
+                  <div class="rules-table-wrap">
+                    <table class="rules-table">
+                      <thead>
+                        <tr>
+                          <th>Asset</th>
+                          <th>Side</th>
+                          <th>Quantity</th>
+                          <th>Limit</th>
+                          <th id="asset-rule-price-header">Price (ATLAS)</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody id="asset-rules-body"></tbody>
+                      <tfoot>
+                        <tr>
+                          <td colspan="5"></td>
+                          <td class="remove-cell add-row-cell">
+                            <button id="add-rule-row-btn" type="button">+ Add Row</button>
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+              </section>
+
+              <section class="tab-panel" data-panel="setup" role="tabpanel" aria-labelledby="tab-setup">
+                <div class="panel-toolbar">
+                  <h2>Settings</h2>
+                  <button id="toggle-sensitive-btn" type="button">Show Sensitive Fields</button>
+                </div>
+
+                <div class="config-grid">
+                  <label>
+                    Aephia API Key
+                    <input class="sensitive-field" name="AEPHIA_API_KEY" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    RPC URL
+                    <input class="sensitive-field" name="RPC_URL" type="text" autocomplete="off" />
+                  </label>
+                  <label class="config-wide">
+                    Hot Wallet Secret
+                    <textarea class="sensitive-field" name="HOT_WALLET_SECRET" rows="3"></textarea>
+                  </label>
+                  <label>
+                    Requests / sec (Helius free plan is limited to 10 Requests / sec)
+                    <input name="RPC_REQUESTS_PER_SECOND" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    sendTransaction / sec (Helius free plan is limited to 1 txs/sec)
+                    <input name="RPC_TX_SEND_RATE_LIMIT_PER_SECOND" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    Chain status refresh interval minutes
+                    <input name="CHAIN_STATUS_REFRESH_INTERVAL_MINUTES" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    Cycle Interval Minutes
+                    <input name="CHECK_INTERVAL_MINUTES" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    Relevant Buy Order %
+                    <input name="RELEVANT_BUY_ORDER_PCT" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    Relevant Sell Order %
+                    <input name="RELEVANT_SELL_ORDER_PCT" type="text" autocomplete="off" />
+                  </label>
+                </div>
+
+                <div class="panel setup-logs-panel">
+                  <h2>Logs</h2>
+                  <pre id="logs"></pre>
+                </div>
+              </section>
+            </form>
+
+            <div class="actions">
+              <button id="save-btn" type="button">Save Settings</button>
+              <button id="start-btn" type="button">Start Bot</button>
+              <button id="stop-btn" type="button">Stop Bot</button>
+            </div>
+          </section>
+
+        </div>
+      </main>
+
+      <aside class="status-rail">
+        <div class="status-rail-inner">
+          <section class="status-panel status-panel-header">
+            <div class="status-title-row">
+              <div>
+                <h2 class="status-panel-title">Status</h2>
+                <p class="status-panel-subtitle" id="bot-runtime">Stopped</p>
+              </div>
+              <button class="rail-update-btn" id="update-btn" type="button">Update</button>
+            </div>
+
+            <div class="wallet-line">
+              <span class="wallet-label">Wallet</span>
+              <span class="wallet-value mono" id="wallet-address">—</span>
+            </div>
+
+            <div class="balance-grid">
+              <div class="balance-card">
+                <span class="balance-label">SOL</span>
+                <strong class="balance-value" id="sol-balance">—</strong>
+              </div>
+              <div class="balance-card">
+                <span class="balance-label">ATLAS</span>
+                <strong class="balance-value" id="atlas-balance">—</strong>
+              </div>
+              <div class="balance-card">
+                <span class="balance-label">USDC</span>
+                <strong class="balance-value" id="usdc-balance">—</strong>
+              </div>
+            </div>
+
+            <div class="status-metrics" id="status-metrics">
+              <div class="metric-row">
+                <span>Last cycle</span>
+                <span id="last-cycle-at">—</span>
+              </div>
+              <div class="metric-row">
+                <span>Next cycle in</span>
+                <span id="next-cycle-in">—</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="status-panel">
+            <div class="status-section-header">
+              <h3>Open Orders</h3>
+              <span class="section-count" id="open-orders-count">0</span>
+            </div>
+            <div id="open-orders-list" class="status-list">
+              <div class="empty-state">No open orders</div>
+            </div>
+          </section>
+
+          <section class="status-panel">
+            <div class="status-section-header">
+              <h3>Inventory</h3>
+              <span class="section-count" id="inventory-count">0</span>
+            </div>
+            <div id="inventory-list" class="status-list">
+              <div class="empty-state">All tracked inventory is 0</div>
+            </div>
+          </section>
+
+          <section class="status-panel">
+            <div class="status-section-header">
+              <h3>Recent Activity</h3>
+              <span class="section-count" id="recent-activity-count">0</span>
+            </div>
+            <div id="recent-activity-list" class="status-list">
+              <div class="empty-state">No recent activity</div>
+            </div>
+          </section>
+
+        </div>
+      </aside>
+    </div>
+
+    <div class="modal-backdrop" id="update-modal" hidden>
+      <section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title">
+        <h2 id="update-dialog-title">LM Market Bot Update</h2>
+        <div class="update-version-grid">
+          <span>Current version</span>
+          <strong id="update-current-version">v0.1.0</strong>
+          <span>Latest GitHub version</span>
+          <strong id="update-latest-version">Checking...</strong>
+        </div>
+        <p class="update-message" id="update-message">Checking GitHub for the latest version...</p>
+        <div class="update-dialog-actions">
+          <button id="update-confirm-btn" type="button" disabled>Update</button>
+          <button id="update-cancel-btn" type="button">Cancel</button>
+        </div>
+      </section>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

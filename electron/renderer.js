@@ -1,0 +1,1206 @@
+const fields = [
+  'AEPHIA_API_KEY',
+  'RPC_URL',
+  'HOT_WALLET_SECRET',
+  'RPC_REQUESTS_PER_SECOND',
+  'RPC_TX_SEND_RATE_LIMIT_PER_SECOND',
+  'CHAIN_STATUS_REFRESH_INTERVAL_MINUTES',
+  'CHECK_INTERVAL_MINUTES',
+  'RELEVANT_BUY_ORDER_PCT',
+  'RELEVANT_SELL_ORDER_PCT',
+];
+
+const STATUS_POLL_MS = 60000;
+const AUTO_RERUN_COOLDOWN_MS = 120000;
+const APP_VERSION = '0.1.0';
+const FULL_RESTART_CONFIG_KEYS = new Set([
+  'AEPHIA_API_KEY',
+  'RPC_URL',
+  'RPC_URL_FALLBACK',
+  'HOT_WALLET_SECRET',
+  'RESOURCE_LIST',
+]);
+const RERUN_ALL_ASSETS_CONFIG_KEYS = new Set([
+  'MIN_SELL_QUANTITY',
+  'MIN_PRICE',
+  'RELEVANT_SELL_ORDER_PCT',
+  'RELEVANT_BUY_ORDER_PCT',
+]);
+
+const form = document.getElementById('config-form');
+const logsEl = document.getElementById('logs');
+const saveBtn = document.getElementById('save-btn');
+const startBtn = document.getElementById('start-btn');
+const stopBtn = document.getElementById('stop-btn');
+const updateBtn = document.getElementById('update-btn');
+const updateModal = document.getElementById('update-modal');
+const updateCurrentVersionEl = document.getElementById('update-current-version');
+const updateLatestVersionEl = document.getElementById('update-latest-version');
+const updateMessageEl = document.getElementById('update-message');
+const updateConfirmBtn = document.getElementById('update-confirm-btn');
+const updateCancelBtn = document.getElementById('update-cancel-btn');
+const addRuleRowBtn = document.getElementById('add-rule-row-btn');
+const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
+const assetRulesBody = document.getElementById('asset-rules-body');
+const assetRulePriceHeader = document.getElementById('asset-rule-price-header');
+let assetRegistryResourceList = '';
+const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
+const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
+const assetRuleTabButtons = Array.from(document.querySelectorAll('.asset-rule-tab'));
+
+const runningPillEl = document.getElementById('running-pill');
+const walletAddressEl = document.getElementById('wallet-address');
+const solBalanceEl = document.getElementById('sol-balance');
+const atlasBalanceEl = document.getElementById('atlas-balance');
+const usdcBalanceEl = document.getElementById('usdc-balance');
+const botRuntimeEl = document.getElementById('bot-runtime');
+const lastCycleAtEl = document.getElementById('last-cycle-at');
+const nextCycleInEl = document.getElementById('next-cycle-in');
+
+const openOrdersCountEl = document.getElementById('open-orders-count');
+const openOrdersListEl = document.getElementById('open-orders-list');
+const inventoryCountEl = document.getElementById('inventory-count');
+const inventoryListEl = document.getElementById('inventory-list');
+const recentActivityCountEl = document.getElementById('recent-activity-count');
+const recentActivityListEl = document.getElementById('recent-activity-list');
+
+let sensitiveVisible = false;
+let assetRuleRows = [];
+let statusPollHandle = null;
+let lastSavedConfig = null;
+let lastSavedAssetRules = [];
+let lastUiRefreshAtMs = null;
+let lastUpdateCheckCycleCompletedAt = null;
+let previousAssetSignals = new Map();
+const assetLastRerunAtMs = new Map();
+let rerunInFlight = false;
+let activeAssetRuleGroup = 'raw';
+let availableUpdate = null;
+let updateCheckInFlight = false;
+let updateCheckPromise = null;
+
+const RAW_MATERIAL_START = 'Arco';
+const RAW_MATERIAL_END = 'Titanium Ore';
+const COMPONENT_START = 'Ammo';
+const COMPONENT_END = 'Toolkits';
+const SHIP_START = 'Busan Pulse';
+const SHIP_END = 'Rainbow Phi';
+const SHIP_PARTS_START = 'Fimbul Airbike (ship parts)';
+const SHIP_PARTS_END = 'Rainbow Phi (ship parts)';
+const ASSET_RULE_GROUPS = new Set(['raw', 'components', 'ships', 'ship-parts']);
+
+function setRunning(running) {
+  startBtn.disabled = running;
+  stopBtn.disabled = !running;
+
+  runningPillEl.textContent = running ? 'Running' : 'Stopped';
+  runningPillEl.classList.toggle('running', running);
+  runningPillEl.classList.toggle('stopped', !running);
+}
+
+function setUpdateModalOpen(open) {
+  updateModal.hidden = !open;
+}
+
+function renderUpdateButtonState(result, error = null) {
+  const updateAvailable = Boolean(result?.updateAvailable);
+  updateBtn.classList.toggle('update-available', updateAvailable);
+  updateBtn.title = updateAvailable
+    ? `Update available: v${result.latestVersion}`
+    : error
+      ? 'Update check failed'
+      : 'Check for updates';
+}
+
+function renderUpdateModalState(result, error = null) {
+  updateCurrentVersionEl.textContent = `v${result?.currentVersion || APP_VERSION}`;
+  updateLatestVersionEl.textContent = result?.latestVersion ? `v${result.latestVersion}` : 'Unknown';
+  updateConfirmBtn.disabled = !result?.updateAvailable;
+
+  if (error) {
+    updateLatestVersionEl.textContent = 'Unavailable';
+    updateMessageEl.textContent = `Update check failed: ${error?.message || String(error)}`;
+    return;
+  }
+
+  if (result?.updateAvailable) {
+    updateMessageEl.textContent = `A newer LM Market Bot version is available on GitHub.`;
+    updateConfirmBtn.textContent = `Update to v${result.latestVersion}`;
+    return;
+  }
+
+  updateMessageEl.textContent = 'LM Market Bot is already up to date.';
+  updateConfirmBtn.textContent = 'Update';
+}
+
+async function openUpdateDialog() {
+  const cachedUpdate = availableUpdate;
+  if (!cachedUpdate?.updateAvailable) {
+    availableUpdate = null;
+  }
+  updateCurrentVersionEl.textContent = `v${APP_VERSION}`;
+  updateLatestVersionEl.textContent = cachedUpdate?.latestVersion ? `v${cachedUpdate.latestVersion}` : 'Checking...';
+  updateMessageEl.textContent = cachedUpdate?.updateAvailable
+    ? 'A newer LM Market Bot version is available on GitHub.'
+    : 'Checking GitHub for the latest version...';
+  updateConfirmBtn.textContent = 'Update';
+  updateConfirmBtn.disabled = true;
+  updateCancelBtn.disabled = false;
+  setUpdateModalOpen(true);
+
+  try {
+    availableUpdate = await checkForUpdatesAndRenderButton();
+    renderUpdateModalState(availableUpdate);
+  } catch (err) {
+    availableUpdate = null;
+    renderUpdateModalState(null, err);
+    appendLog(`[${new Date().toISOString()}] [ERROR] Update check failed: ${err?.message || String(err)}`);
+  }
+}
+
+async function checkForUpdatesAndRenderButton() {
+  if (updateCheckInFlight) {
+    return updateCheckPromise || availableUpdate;
+  }
+
+  updateCheckInFlight = true;
+  updateCheckPromise = window.botApi.checkForUpdates();
+  try {
+    const result = await updateCheckPromise;
+    availableUpdate = result;
+    renderUpdateButtonState(result);
+    return result;
+  } catch (err) {
+    renderUpdateButtonState(null, err);
+    throw err;
+  } finally {
+    updateCheckInFlight = false;
+    updateCheckPromise = null;
+  }
+}
+
+function maybeCheckForUpdatesAfterCycle(snapshot) {
+  const completedAt = snapshot?.lastCycleCompletedAt || null;
+  if (!completedAt || completedAt === lastUpdateCheckCycleCompletedAt) {
+    return;
+  }
+
+  lastUpdateCheckCycleCompletedAt = completedAt;
+  void checkForUpdatesAndRenderButton().catch((err) => {
+    appendLog(`[${new Date().toISOString()}] [WARN] Update check failed: ${err?.message || String(err)}`);
+  });
+}
+
+function setSensitiveVisible(visible) {
+  sensitiveVisible = visible;
+  form.classList.toggle('sensitive-hidden', !visible);
+  toggleSensitiveBtn.textContent = visible ? 'Hide Sensitive Fields' : 'Show Sensitive Fields';
+}
+
+function setActiveTab(tabName) {
+  const nextTab = tabName === 'setup' ? 'setup' : 'asset-rules';
+  for (const button of tabButtons) {
+    button.classList.toggle('active', nextTab === 'setup');
+    button.setAttribute('aria-selected', String(nextTab === 'setup'));
+    if (button.id === 'tab-setup') {
+      button.textContent = nextTab === 'setup' ? 'Asset Rules' : 'Settings';
+      button.dataset.tab = nextTab === 'setup' ? 'asset-rules' : 'setup';
+    }
+  }
+
+  for (const panel of tabPanels) {
+    panel.classList.toggle('active', panel.dataset.panel === nextTab);
+  }
+}
+
+function parseResources(rawValue) {
+  return String(rawValue ?? '')
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [name, mint] = entry.split(':').map((part) => part.trim());
+      return {
+        value: name ? `${name}:${mint ?? ''}` : entry,
+        label: name || entry,
+      };
+    })
+    .filter((entry) => entry.value && entry.label);
+}
+
+function getAllResourceOptions() {
+  return parseResources(assetRegistryResourceList);
+}
+
+function sliceOptionsByNameRange(options, startName, endName) {
+  const startIndex = options.findIndex((option) => option.label === startName);
+  const endIndex = options.findIndex((option) => option.label === endName);
+  if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+    return [];
+  }
+  return options.slice(startIndex, endIndex + 1);
+}
+
+function getResourceOptions(group = activeAssetRuleGroup) {
+  const options = getAllResourceOptions();
+  if (group === 'ships') {
+    return sliceOptionsByNameRange(options, SHIP_START, SHIP_END);
+  }
+  if (group === 'ship-parts') {
+    return sliceOptionsByNameRange(options, SHIP_PARTS_START, SHIP_PARTS_END);
+  }
+  if (group === 'components') {
+    return sliceOptionsByNameRange(options, COMPONENT_START, COMPONENT_END);
+  }
+  return sliceOptionsByNameRange(options, RAW_MATERIAL_START, RAW_MATERIAL_END);
+}
+
+function getAssetRuleGroupForAsset(asset) {
+  const shipParts = new Set(getResourceOptions('ship-parts').map((option) => option.value));
+  if (shipParts.has(asset)) {
+    return 'ship-parts';
+  }
+  const ships = new Set(getResourceOptions('ships').map((option) => option.value));
+  if (ships.has(asset)) {
+    return 'ships';
+  }
+  const components = new Set(getResourceOptions('components').map((option) => option.value));
+  if (components.has(asset)) {
+    return 'components';
+  }
+  return 'raw';
+}
+
+function getAssetRuleGroupForRow(row) {
+  const group = String(row?.group ?? '').trim();
+  if (ASSET_RULE_GROUPS.has(group)) {
+    return group;
+  }
+  return getAssetRuleGroupForAsset(row?.asset);
+}
+
+function buildDefaultAssetRuleRows(group = null) {
+  const groups = group && ASSET_RULE_GROUPS.has(group) ? [group] : ['raw', 'components', 'ships', 'ship-parts'];
+  return groups.flatMap((nextGroup) =>
+    getResourceOptions(nextGroup).map((resource) => ({
+      group: nextGroup,
+      asset: resource.value,
+      side: 'sell',
+      quantity: '',
+      limit: '',
+      price: '',
+    })),
+  );
+}
+
+function ensureAssetRuleRows() {
+  if (!assetRuleRows.length) {
+    assetRuleRows = buildDefaultAssetRuleRows();
+  }
+}
+
+function syncRowsWithResources() {
+  if (!assetRuleRows.length) {
+    assetRuleRows = buildDefaultAssetRuleRows();
+    return;
+  }
+
+  assetRuleRows = normalizeAssetRuleRows(assetRuleRows);
+}
+
+function normalizeAssetRuleRows(rows) {
+  const options = getAllResourceOptions();
+  const validValues = new Set(options.map((option) => option.value));
+
+  return (Array.isArray(rows) ? rows : []).map((row, index) => {
+    const group = getAssetRuleGroupForRow(row);
+    const asset = String(row?.asset ?? '').trim();
+    if (validValues.has(asset)) {
+      return {
+        group,
+        asset,
+        side: row?.side === 'buy' ? 'buy' : 'sell',
+        quantity: String(row?.quantity ?? '').trim(),
+        limit: String(row?.limit ?? '').trim(),
+        price: String(row?.price ?? '').trim(),
+      };
+    }
+
+    const groupOptions = getResourceOptions(group);
+    const fallbackOptions = groupOptions.length ? groupOptions : options;
+    const fallbackAsset = fallbackOptions[index]?.value ?? fallbackOptions[0]?.value ?? options[0]?.value ?? '';
+    return {
+      group,
+      asset: fallbackAsset,
+      side: row?.side === 'buy' ? 'buy' : 'sell',
+      quantity: String(row?.quantity ?? '').trim(),
+      limit: String(row?.limit ?? '').trim(),
+      price: String(row?.price ?? '').trim(),
+    };
+  });
+}
+
+function updateRuleHint(rowElement, side) {
+  const quantityHint = rowElement.querySelector('[data-role="quantity-hint"]');
+  const limitHint = rowElement.querySelector('[data-role="limit-hint"]');
+  const priceHint = rowElement.querySelector('[data-role="price-hint"]');
+  if (quantityHint) {
+    quantityHint.textContent = side === 'buy' ? 'Max buy quantity' : 'Min sell quantity';
+  }
+  if (limitHint) {
+    limitHint.textContent = side === 'buy' ? 'Max buy quantity' : 'Max sell quantity';
+  }
+  if (priceHint) {
+    priceHint.textContent = side === 'buy' ? 'Max price' : 'Min price';
+  }
+}
+
+function renderAssetRuleRows() {
+  syncRowsWithResources();
+  const isShipMarket = activeAssetRuleGroup === 'ships' || activeAssetRuleGroup === 'ship-parts';
+  if (assetRulePriceHeader) {
+    assetRulePriceHeader.textContent = isShipMarket ? 'Price (USDC)' : 'Price (ATLAS)';
+  }
+  const allOptions = getAllResourceOptions();
+  const options = getResourceOptions(activeAssetRuleGroup);
+  const visibleRows = assetRuleRows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => getAssetRuleGroupForRow(row) === activeAssetRuleGroup);
+
+  const rulesTable = assetRulesBody.closest('table');
+  if (rulesTable) {
+    rulesTable.classList.toggle('ships-rules-table', isShipMarket);
+  }
+
+  assetRulesBody.innerHTML = '';
+  addRuleRowBtn.disabled = options.length === 0;
+
+  if (!allOptions.length) {
+    assetRulesBody.innerHTML = '<tr><td colspan="6" class="empty-state">Asset registry unavailable. Save a valid Aephia API Key in Settings to load the managed asset list.</td></tr>';
+    return;
+  }
+
+  if (!options.length) {
+    assetRulesBody.innerHTML = '<tr><td colspan="6" class="empty-state">No assets available for this group.</td></tr>';
+    return;
+  }
+
+  if (!visibleRows.length) {
+    const groupLabel =
+      activeAssetRuleGroup === 'ships'
+        ? 'ship'
+        : activeAssetRuleGroup === 'ship-parts'
+          ? 'ship part'
+          : activeAssetRuleGroup === 'components'
+            ? 'component'
+            : 'raw material';
+    assetRulesBody.innerHTML = `<tr><td colspan="6" class="empty-state">No ${groupLabel} rules yet. Use + Add Row.</td></tr>`;
+    return;
+  }
+
+  visibleRows.forEach(({ row, index }) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>
+        <select data-index="${index}" data-field="asset"></select>
+      </td>
+      <td>
+        <select data-index="${index}" data-field="side">
+          <option value="buy">buy</option>
+          <option value="sell">sell</option>
+        </select>
+      </td>
+      <td>
+        <div class="cell-stack">
+          <input data-index="${index}" data-field="quantity" type="number" min="0" step="1" inputmode="numeric" />
+          <span class="cell-hint" data-role="quantity-hint"></span>
+        </div>
+      </td>
+      <td>
+        <div class="cell-stack">
+          <input data-index="${index}" data-field="limit" type="number" min="0" step="1" inputmode="numeric" />
+          <span class="cell-hint" data-role="limit-hint"></span>
+        </div>
+      </td>
+      <td>
+        <div class="cell-stack">
+          <input data-index="${index}" data-field="price" type="number" min="0" step="0.000001" inputmode="decimal" />
+          <span class="cell-hint" data-role="price-hint"></span>
+        </div>
+      </td>
+      <td class="remove-cell">
+        <div class="cell-stack">
+          <button type="button" class="cancel-order-btn" data-index="${index}">Cancel Order</button>
+          <button type="button" class="remove-row-btn" data-index="${index}">Remove</button>
+        </div>
+      </td>
+    `;
+
+    const assetSelect = tr.querySelector('[data-field="asset"]');
+    const sideSelect = tr.querySelector('[data-field="side"]');
+    const quantityInput = tr.querySelector('[data-field="quantity"]');
+    const limitInput = tr.querySelector('[data-field="limit"]');
+    const priceInput = tr.querySelector('[data-field="price"]');
+    const cancelOrderBtn = tr.querySelector('.cancel-order-btn');
+
+    for (const option of options) {
+      const opt = document.createElement('option');
+      opt.value = option.value;
+      opt.textContent = option.label;
+      assetSelect.appendChild(opt);
+    }
+
+    assetSelect.value = options.some((option) => option.value === row.asset) ? row.asset : options[0].value;
+    sideSelect.value = row.side === 'buy' ? 'buy' : 'sell';
+    quantityInput.value = row.quantity ?? '';
+    limitInput.value = row.limit ?? '';
+    priceInput.value = row.price ?? '';
+    updateRuleHint(tr, sideSelect.value);
+
+    assetSelect.addEventListener('change', (event) => {
+      assetRuleRows[index].asset = event.target.value;
+    });
+
+    sideSelect.addEventListener('change', (event) => {
+      assetRuleRows[index].side = event.target.value;
+      updateRuleHint(tr, event.target.value);
+    });
+
+    quantityInput.addEventListener('input', (event) => {
+      assetRuleRows[index].quantity = event.target.value;
+    });
+
+    limitInput.addEventListener('input', (event) => {
+      assetRuleRows[index].limit = event.target.value;
+    });
+
+    priceInput.addEventListener('input', (event) => {
+      assetRuleRows[index].price = event.target.value;
+    });
+
+    cancelOrderBtn.addEventListener('click', async () => {
+      const rowSnapshot = {
+        asset: assetRuleRows[index]?.asset ?? '',
+        side: assetRuleRows[index]?.side === 'buy' ? 'buy' : 'sell',
+      };
+
+      cancelOrderBtn.disabled = true;
+      try {
+        const result = await window.botApi.cancelOrder(rowSnapshot);
+        const status = result?.status ?? 'unknown';
+        appendLog(`[${new Date().toISOString()}] [INFO] Cancel order ${status} for ${rowSnapshot.asset} [${rowSnapshot.side}]`);
+        await refreshBotStatus();
+      } catch (err) {
+        appendLog(`[${new Date().toISOString()}] [ERROR] ${err?.message || String(err)}`);
+      } finally {
+        cancelOrderBtn.disabled = false;
+      }
+    });
+
+    tr.querySelector('.remove-row-btn').addEventListener('click', () => {
+      assetRuleRows.splice(index, 1);
+      if (!assetRuleRows.length) {
+        assetRuleRows = buildDefaultAssetRuleRows(activeAssetRuleGroup).slice(0, 1);
+      }
+      renderAssetRuleRows();
+    });
+
+    assetRulesBody.appendChild(tr);
+  });
+}
+
+function readFormConfig() {
+  const data = {};
+  for (const key of fields) {
+    const element = form.elements.namedItem(key);
+    data[key] = element ? String(element.value ?? '').trim() : '';
+  }
+  return data;
+}
+
+function writeFormConfig(config) {
+  assetRegistryResourceList = String(config?.RESOURCE_LIST ?? '');
+  for (const key of fields) {
+    const element = form.elements.namedItem(key);
+    if (element) {
+      element.value = config[key] ?? '';
+    }
+  }
+}
+
+function appendLog(line) {
+  logsEl.textContent += `${line}\n`;
+  logsEl.scrollTop = logsEl.scrollHeight;
+}
+
+function formatNumber(value, maximumFractionDigits = 6) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '—';
+  }
+  return new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits,
+  }).format(value);
+}
+
+function formatTimestamp(value) {
+  if (!value) {
+    return '—';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  return date.toLocaleString();
+}
+
+function formatRelativeDuration(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    return '—';
+  }
+
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`;
+  }
+
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatRuntime(startedAt, running) {
+  const versionSuffix = ` | v${APP_VERSION}`;
+
+  if (!running || !startedAt) {
+    return `Stopped${versionSuffix}`;
+  }
+
+  const start = new Date(startedAt);
+  if (Number.isNaN(start.getTime())) {
+    return `Running${versionSuffix}`;
+  }
+
+  const elapsed = Date.now() - start.getTime();
+  return `Running for ${formatRelativeDuration(elapsed)}${versionSuffix}`;
+}
+
+function shortenWallet(value) {
+  if (!value || typeof value !== 'string' || value === '—') {
+    return '—';
+  }
+  if (value.length <= 14) {
+    return value;
+  }
+  return `${value.slice(0, 6)}…${value.slice(-6)}`;
+}
+
+function setListCount(element, count) {
+  element.textContent = String(count ?? 0);
+}
+
+function getAssetRuleOrderMap() {
+  const orderMap = new Map();
+  assetRuleRows.forEach((row, index) => {
+    const asset = String(row?.asset || '').split(':')[0]?.trim();
+    if (asset && !orderMap.has(asset)) {
+      orderMap.set(asset, index);
+    }
+  });
+  return orderMap;
+}
+
+function sortByAssetRuleOrder(items, assetGetter) {
+  const orderMap = getAssetRuleOrderMap();
+  return [...items].sort((a, b) => {
+    const assetA = String(assetGetter(a) || '').trim();
+    const assetB = String(assetGetter(b) || '').trim();
+    const indexA = orderMap.has(assetA) ? orderMap.get(assetA) : Number.MAX_SAFE_INTEGER;
+    const indexB = orderMap.has(assetB) ? orderMap.get(assetB) : Number.MAX_SAFE_INTEGER;
+
+    if (indexA !== indexB) {
+      return indexA - indexB;
+    }
+
+    return assetA.localeCompare(assetB);
+  });
+}
+
+function renderOpenOrders(orders) {
+  openOrdersListEl.innerHTML = '';
+  setListCount(openOrdersCountEl, orders.length);
+
+  if (!orders.length) {
+    openOrdersListEl.innerHTML = '<div class="empty-state">No open orders</div>';
+    return;
+  }
+
+  const sortedOrders = sortByAssetRuleOrder(orders, (order) => order?.asset);
+
+  for (const order of sortedOrders) {
+    const item = document.createElement('div');
+    item.className = 'status-item order-item';
+
+    const hasOriginalQuantity = typeof order.quantity === 'number' && Number.isFinite(order.quantity);
+    const isPartiallyFilled =
+      hasOriginalQuantity &&
+      typeof order.remaining === 'number' &&
+      Number.isFinite(order.remaining) &&
+      order.remaining < order.quantity;
+    const qtyLabel = isPartiallyFilled ? 'Remaining / Size' : 'Qty';
+    const qtyText = isPartiallyFilled
+      ? `${formatNumber(order.remaining, 0)} / ${formatNumber(order.quantity, 0)}`
+      : formatNumber(order.remaining, 0);
+
+    item.innerHTML = `
+      <div class="status-item-top">
+        <div class="order-left">
+          <span class="order-asset">${order.asset || 'Unknown Asset'}</span>
+          <span class="badge ${order.side === 'buy' ? 'buy' : 'sell'}">${order.side}</span>
+          ${order.marketLeader === 'hb' ? '<span class="badge leader">BB</span>' : ''}
+          ${order.marketLeader === 'ba' ? '<span class="badge leader">BA</span>' : ''}
+          ${order.partiallyFilled ? '<span class="badge partial">Partial</span>' : ''}
+        </div>
+        <div class="order-right">
+          <span class="order-metric">
+            <span class="order-metric-label">Price</span>
+            <span>${formatNumber(order.price, 6)} ${order.currency || ''}</span>
+          </span>
+          <span class="order-metric">
+            <span class="order-metric-label">${qtyLabel}</span>
+            <span>${qtyText}</span>
+          </span>
+        </div>
+      </div>
+    `;
+
+    openOrdersListEl.appendChild(item);
+  }
+}
+
+function renderInventory(items) {
+  inventoryListEl.innerHTML = '';
+  const visibleItems = (Array.isArray(items) ? items : []).filter(
+    (item) => typeof item?.balance === 'number' && Number.isFinite(item.balance) && item.balance > 0,
+  );
+  setListCount(inventoryCountEl, visibleItems.length);
+
+  if (!visibleItems.length) {
+    inventoryListEl.innerHTML = '<div class="empty-state">All tracked inventory is 0</div>';
+    return;
+  }
+
+  const sortedItems = sortByAssetRuleOrder(visibleItems, (item) => item?.asset);
+
+  for (const itemData of sortedItems) {
+    const item = document.createElement('div');
+    item.className = 'status-item inventory-item';
+
+    item.innerHTML = `
+      <div class="status-item-top">
+        <div class="inventory-left">
+          <span class="inventory-asset">${itemData.asset || itemData.mint || 'Unknown Asset'}</span>
+        </div>
+        <div class="inventory-right">
+          <span class="inventory-metric">
+            <span class="inventory-metric-label">Balance</span>
+            <span>${formatNumber(itemData.balance, 6)}</span>
+          </span>
+        </div>
+      </div>
+    `;
+
+    inventoryListEl.appendChild(item);
+  }
+}
+
+function getActivityTitle(entry) {
+  if (entry.event === 'START') {
+    return 'Bot Start';
+  }
+  if (entry.event === 'FILLED') {
+    return ['FILLED', entry.resource || entry.asset || ''].filter(Boolean).join(' · ');
+  }
+  return [entry.event, entry.resource || entry.asset || ''].filter(Boolean).join(' · ');
+}
+
+function getActivityTone(entry) {
+  if (entry.event === 'FILLED') {
+    return 'filled';
+  }
+  if (entry.event === 'START') {
+    return 'start';
+  }
+  return 'default';
+}
+
+function getActivityBadge(entry) {
+  if (entry.event === 'FILLED') {
+    return '<span class="badge activity-badge filled">FILLED</span>';
+  }
+  if (entry.event === 'START') {
+    return '<span class="badge activity-badge start">START</span>';
+  }
+  return '';
+}
+
+function renderRecentActivity(items) {
+  recentActivityListEl.innerHTML = '';
+  setListCount(recentActivityCountEl, items.length);
+
+  if (!items.length) {
+    recentActivityListEl.innerHTML = '<div class="empty-state">No recent activity</div>';
+    return;
+  }
+
+  for (const entry of items) {
+    const tone = getActivityTone(entry);
+    const item = document.createElement('div');
+    item.className = `status-item activity-item activity-item-${tone}`;
+
+    const title = getActivityTitle(entry);
+    const badge = getActivityBadge(entry);
+
+    const details = [];
+    if (entry.side) {
+      details.push(entry.side);
+    }
+    if (typeof entry.price === 'number') {
+      details.push(`P ${formatNumber(entry.price, 6)}`);
+    }
+    if (typeof entry.quantity === 'number') {
+      details.push(`Q ${formatNumber(entry.quantity, 0)}`);
+    }
+    if (typeof entry.remaining === 'number') {
+      details.push(`R ${formatNumber(entry.remaining, 0)}`);
+    }
+    if (entry.message) {
+      details.push(entry.message);
+    }
+
+    item.innerHTML = `
+      <div class="status-item-top">
+        <div class="activity-left">
+          <span class="activity-title">${title || 'Activity'}</span>
+          ${badge}
+        </div>
+        <div class="activity-right">
+          <span class="activity-metric">
+            <span class="activity-metric-label">At</span>
+            <span>${formatTimestamp(entry.timestamp)}</span>
+          </span>
+        </div>
+      </div>
+      <div class="status-item-row">
+        <span class="status-item-subtle">Details</span>
+        <span class="status-item-value">${details.join(' · ') || '—'}</span>
+      </div>
+    `;
+
+    recentActivityListEl.appendChild(item);
+  }
+}
+
+function collectAssetSignals(snapshot) {
+  const signal = new Map();
+
+  const inventory = Array.isArray(snapshot?.inventory) ? snapshot.inventory : [];
+  for (const item of inventory) {
+    const asset = String(item?.asset || '').trim();
+    if (!asset) continue;
+    const prev = signal.get(asset) || { inventoryBalance: null, openRemaining: 0, openCount: 0 };
+    prev.inventoryBalance = typeof item?.balance === 'number' ? item.balance : null;
+    signal.set(asset, prev);
+  }
+
+  const openOrders = Array.isArray(snapshot?.openOrders) ? snapshot.openOrders : [];
+  for (const order of openOrders) {
+    const asset = String(order?.asset || '').trim();
+    if (!asset) continue;
+    const prev = signal.get(asset) || { inventoryBalance: null, openRemaining: 0, openCount: 0 };
+    prev.openCount += 1;
+    if (typeof order?.remaining === 'number' && Number.isFinite(order.remaining)) {
+      prev.openRemaining += order.remaining;
+    }
+    signal.set(asset, prev);
+  }
+
+  return signal;
+}
+
+async function maybeAutoRerunFromStatus(snapshot, running) {
+  const nextSignals = collectAssetSignals(snapshot);
+
+  if (!running || rerunInFlight) {
+    previousAssetSignals = nextSignals;
+    return;
+  }
+
+  const now = Date.now();
+  const touched = new Set();
+
+  for (const [asset, next] of nextSignals.entries()) {
+    const prev = previousAssetSignals.get(asset);
+    if (!prev) continue;
+
+    const inventoryChanged =
+      typeof prev.inventoryBalance === 'number' &&
+      typeof next.inventoryBalance === 'number' &&
+      Math.abs(prev.inventoryBalance - next.inventoryBalance) > 0.0000001;
+    const openRemainingChanged = Math.abs((prev.openRemaining || 0) - (next.openRemaining || 0)) > 0;
+    const openCountChanged = (prev.openCount || 0) !== (next.openCount || 0);
+
+    if (inventoryChanged || openRemainingChanged || openCountChanged) {
+      const lastAt = assetLastRerunAtMs.get(asset) || 0;
+      if (now - lastAt >= AUTO_RERUN_COOLDOWN_MS) {
+        touched.add(asset);
+      }
+    }
+  }
+
+  previousAssetSignals = nextSignals;
+  if (!touched.size) return;
+
+  rerunInFlight = true;
+  const assets = Array.from(touched);
+  try {
+    appendLog(`[${new Date().toISOString()}] [INFO] Detected live asset changes, rerunning: ${assets.join(', ')}`);
+    const result = await window.botApi.rerunAssets(assets);
+    if (result?.ok) {
+      const stamp = Date.now();
+      assets.forEach((asset) => assetLastRerunAtMs.set(asset, stamp));
+    }
+  } catch (err) {
+    appendLog(`[${new Date().toISOString()}] [WARN] Auto-rerun failed: ${err?.message || String(err)}`);
+  } finally {
+    rerunInFlight = false;
+  }
+}
+
+function renderStatusSnapshot(snapshot) {
+  const running = Boolean(snapshot?.running);
+  setRunning(running);
+  lastUiRefreshAtMs = Date.now();
+
+  walletAddressEl.textContent = shortenWallet(snapshot?.wallet || '—');
+  walletAddressEl.title = snapshot?.wallet || '—';
+
+  solBalanceEl.textContent = formatNumber(snapshot?.solBalance, 6);
+  atlasBalanceEl.textContent = formatNumber(snapshot?.atlasBalance, 2);
+  usdcBalanceEl.textContent = formatNumber(snapshot?.usdcBalance, 2);
+  botRuntimeEl.textContent = formatRuntime(
+    snapshot?.startedAt,
+    running,
+    snapshot?.lastCycleCompletedAt || snapshot?.lastCycleStartedAt
+  );
+
+  lastCycleAtEl.textContent = formatTimestamp(snapshot?.lastCycleCompletedAt || snapshot?.lastCycleStartedAt);
+
+  if (nextCycleInEl) {
+    const intervalMinutes = Number(
+      form?.elements?.namedItem('CHECK_INTERVAL_MINUTES')?.value ?? snapshot?.checkIntervalMinutes ?? NaN
+    );
+    const baseAt = snapshot?.lastCycleStartedAt || snapshot?.lastCycleCompletedAt || snapshot?.startedAt;
+    const baseMs = baseAt ? new Date(baseAt).getTime() : Number.NaN;
+
+    if (Number.isFinite(intervalMinutes) && intervalMinutes > 0 && Number.isFinite(baseMs)) {
+      const nextCycleAt = baseMs + intervalMinutes * 60 * 1000;
+      const msRemaining = Math.max(0, nextCycleAt - Date.now());
+      nextCycleInEl.textContent = formatRelativeDuration(msRemaining);
+    } else {
+      nextCycleInEl.textContent = '—';
+    }
+  }
+
+  renderOpenOrders(Array.isArray(snapshot?.openOrders) ? snapshot.openOrders : []);
+  renderInventory(Array.isArray(snapshot?.inventory) ? snapshot.inventory : []);
+  renderRecentActivity(Array.isArray(snapshot?.recentActivity) ? snapshot.recentActivity : []);
+
+  maybeCheckForUpdatesAfterCycle(snapshot);
+  void maybeAutoRerunFromStatus(snapshot, running);
+}
+
+async function refreshBotStatus() {
+  try {
+    const snapshot = await window.botApi.getBotStatus();
+    renderStatusSnapshot(snapshot || {});
+  } catch (err) {
+    appendLog(`[${new Date().toISOString()}] [ERROR] Failed to fetch bot status: ${err?.message || String(err)}`);
+  }
+}
+
+function startStatusPolling() {
+  stopStatusPolling();
+  statusPollHandle = window.setInterval(() => {
+    void refreshBotStatus();
+  }, STATUS_POLL_MS);
+}
+
+function stopStatusPolling() {
+  if (statusPollHandle) {
+    window.clearInterval(statusPollHandle);
+    statusPollHandle = null;
+  }
+}
+
+function normalizeAssetRulesForDiff(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => ({
+      group: String(row?.group ?? '').trim(),
+      asset: String(row?.asset ?? '').trim(),
+      side: row?.side === 'buy' ? 'buy' : 'sell',
+      quantity: String(row?.quantity ?? '').trim(),
+      limit: String(row?.limit ?? '').trim(),
+      price: String(row?.price ?? '').trim(),
+    }))
+    .filter((row) => row.asset)
+    .sort((a, b) => `${a.group}|${a.asset}|${a.side}`.localeCompare(`${b.group}|${b.asset}|${b.side}`));
+}
+
+function getChangedAssets(previousRows, nextRows) {
+  const prevMap = new Map(
+    normalizeAssetRulesForDiff(previousRows).map((row) => [`${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
+  );
+  const nextMap = new Map(
+    normalizeAssetRulesForDiff(nextRows).map((row) => [`${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
+  );
+
+  const touched = new Set();
+  const keys = new Set([...prevMap.keys(), ...nextMap.keys()]);
+  for (const key of keys) {
+    if (prevMap.get(key) !== nextMap.get(key)) {
+      touched.add(key.split('|')[1]);
+    }
+  }
+  return Array.from(touched);
+}
+
+function getChangedConfigKeys(previousConfig, nextConfig) {
+  const keys = new Set([
+    ...Object.keys(previousConfig || {}),
+    ...Object.keys(nextConfig || {}),
+  ]);
+  const changed = [];
+
+  for (const key of keys) {
+    if (String(previousConfig?.[key] ?? '') !== String(nextConfig?.[key] ?? '')) {
+      changed.push(key);
+    }
+  }
+
+  return changed;
+}
+
+function getConfiguredAssets(rows) {
+  return Array.from(
+    new Set(
+      normalizeAssetRulesForDiff(rows)
+        .map((row) => row.asset)
+        .filter(Boolean)
+    )
+  );
+}
+
+async function saveAllSettings() {
+  const payload = {
+    config: readFormConfig(),
+    assetRules: assetRuleRows,
+  };
+  const result = await window.botApi.saveSettings(payload);
+  assetRuleRows = Array.isArray(result.assetRules) ? normalizeAssetRuleRows(result.assetRules) : assetRuleRows;
+  return result;
+}
+
+async function boot() {
+  const state = await window.botApi.getSettings();
+  writeFormConfig(state.config);
+  assetRuleRows = Array.isArray(state.assetRules) && state.assetRules.length ? normalizeAssetRuleRows(state.assetRules) : buildDefaultAssetRuleRows();
+  ensureAssetRuleRows();
+  renderAssetRuleRows();
+  lastSavedConfig = { ...(state.config || {}) };
+  lastSavedAssetRules = normalizeAssetRulesForDiff(assetRuleRows);
+  setRunning(Boolean(state.running));
+  setSensitiveVisible(false);
+  setActiveTab('asset-rules');
+
+  const renderLogEntry = (entry) => {
+    appendLog(`[${entry.timestamp}] [${entry.level}] ${entry.message}`);
+
+    const message = String(entry?.message || '');
+    const shouldRefreshNow =
+      message.includes('Placing ') ||
+      message.includes('Cancelling ') ||
+      message.includes('Cancelled ') ||
+      message.includes('FILLED') ||
+      message.includes('PLACE') ||
+      message.includes('CANCEL');
+
+    if (shouldRefreshNow) {
+      void refreshBotStatus();
+    }
+  };
+
+  const existingLogs = typeof window.botApi.getLogs === 'function' ? await window.botApi.getLogs() : [];
+  for (const entry of existingLogs || []) renderLogEntry(entry);
+  window.botApi.onLog(renderLogEntry);
+
+  window.botApi.onStatus((entry) => {
+    setRunning(Boolean(entry.running));
+    void refreshBotStatus();
+  });
+
+  await refreshBotStatus();
+  startStatusPolling();
+  void checkForUpdatesAndRenderButton().catch((err) => {
+    appendLog(`[${new Date().toISOString()}] [WARN] Update check failed: ${err?.message || String(err)}`);
+  });
+}
+
+saveBtn.addEventListener('click', async () => {
+  const previousConfig = { ...(lastSavedConfig || {}) };
+  const previousRules = [...lastSavedAssetRules];
+
+  const result = await saveAllSettings();
+  renderAssetRuleRows();
+  appendLog(`[${new Date().toISOString()}] [INFO] Settings saved`);
+
+  const currentConfig = { ...(result?.config || readFormConfig()) };
+  const currentRules = normalizeAssetRulesForDiff(assetRuleRows);
+
+  const changedConfigKeys = getChangedConfigKeys(previousConfig, currentConfig);
+  const needsRestart = changedConfigKeys.some((key) => FULL_RESTART_CONFIG_KEYS.has(key));
+  const rerunAllAssets = changedConfigKeys.some((key) => RERUN_ALL_ASSETS_CONFIG_KEYS.has(key));
+  const changedAssets = getChangedAssets(previousRules, currentRules);
+
+  const wasRunning = startBtn.disabled;
+  if (wasRunning) {
+    if (needsRestart) {
+      appendLog(`[${new Date().toISOString()}] [INFO] Restarting bot to apply settings immediately...`);
+      await window.botApi.stopBot();
+      await window.botApi.startBot();
+    } else {
+      const assetsToRerun = rerunAllAssets ? getConfiguredAssets(currentRules) : changedAssets;
+      const changedConfigLabel = changedConfigKeys.length ? changedConfigKeys.join(', ') : 'none';
+
+      if (assetsToRerun.length > 0) {
+        appendLog(
+          `[${new Date().toISOString()}] [INFO] Applying settings without full restart; rerunning assets: ${assetsToRerun.join(', ')}`
+        );
+      } else {
+        appendLog(
+          `[${new Date().toISOString()}] [INFO] Applying settings without full restart; changed config: ${changedConfigLabel}`
+        );
+      }
+
+      const applied = await window.botApi.applyRunningSettings({ assets: assetsToRerun });
+      if (!applied?.ok) {
+        appendLog(`[${new Date().toISOString()}] [WARN] Running settings apply failed; falling back to restart.`);
+        await window.botApi.stopBot();
+        await window.botApi.startBot();
+      }
+    }
+  }
+
+  lastSavedConfig = currentConfig;
+  lastSavedAssetRules = currentRules;
+  await refreshBotStatus();
+});
+
+startBtn.addEventListener('click', async () => {
+  const result = await saveAllSettings();
+  renderAssetRuleRows();
+  lastSavedConfig = { ...(result?.config || readFormConfig()) };
+  lastSavedAssetRules = normalizeAssetRulesForDiff(assetRuleRows);
+  await window.botApi.startBot();
+  await refreshBotStatus();
+});
+
+stopBtn.addEventListener('click', async () => {
+  await window.botApi.stopBot();
+  await refreshBotStatus();
+});
+
+updateBtn.addEventListener('click', () => {
+  void openUpdateDialog();
+});
+
+updateCancelBtn.addEventListener('click', () => {
+  setUpdateModalOpen(false);
+});
+
+updateModal.addEventListener('click', (event) => {
+  if (event.target === updateModal) {
+    setUpdateModalOpen(false);
+  }
+});
+
+updateConfirmBtn.addEventListener('click', async () => {
+  if (!availableUpdate?.updateAvailable) return;
+  updateConfirmBtn.disabled = true;
+  updateCancelBtn.disabled = true;
+  updateMessageEl.textContent = `Downloading LM Market Bot v${availableUpdate.latestVersion} and restarting...`;
+  appendLog(
+    `[${new Date().toISOString()}] [INFO] Downloading LM Market Bot v${availableUpdate.latestVersion} and restarting...`,
+  );
+  try {
+    await window.botApi.downloadUpdateAndRestart();
+  } catch (err) {
+    updateCancelBtn.disabled = false;
+    renderUpdateModalState(availableUpdate, err);
+    appendLog(`[${new Date().toISOString()}] [ERROR] Update failed: ${err?.message || String(err)}`);
+  }
+});
+
+addRuleRowBtn.addEventListener('click', () => {
+  const firstOption = getResourceOptions(activeAssetRuleGroup)[0];
+  if (!firstOption) {
+    appendLog(`[${new Date().toISOString()}] [WARN] Asset registry unavailable. Save a valid Aephia API Key first.`);
+    return;
+  }
+  assetRuleRows.push({
+    group: activeAssetRuleGroup,
+    asset: firstOption.value,
+    side: 'sell',
+    quantity: '',
+    limit: '',
+    price: '',
+  });
+  renderAssetRuleRows();
+});
+
+toggleSensitiveBtn.addEventListener('click', () => {
+  setSensitiveVisible(!sensitiveVisible);
+});
+
+for (const button of tabButtons) {
+  button.addEventListener('click', () => {
+    setActiveTab(button.dataset.tab);
+  });
+}
+
+for (const button of assetRuleTabButtons) {
+  button.addEventListener('click', () => {
+    activeAssetRuleGroup = ['components', 'ships', 'ship-parts'].includes(button.dataset.assetRuleGroup)
+      ? button.dataset.assetRuleGroup
+      : 'raw';
+    for (const tabButton of assetRuleTabButtons) {
+      const active = tabButton.dataset.assetRuleGroup === activeAssetRuleGroup;
+      tabButton.classList.toggle('active', active);
+      tabButton.setAttribute('aria-selected', String(active));
+    }
+    renderAssetRuleRows();
+  });
+}
+
+window.addEventListener('beforeunload', () => {
+  stopStatusPolling();
+});
+
+boot().catch((err) => {
+  appendLog(`[${new Date().toISOString()}] [ERROR] ${err?.message || String(err)}`);
+});

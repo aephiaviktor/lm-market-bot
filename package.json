@@ -1,0 +1,29 @@
+{
+  "name": "lm-market-bot",
+  "version": "0.1.0",
+  "description": "",
+  "main": "electron/main.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && node dist/index.js",
+    "dev:cli": "ts-node src/index.ts",
+    "start:electron": "npm run build && electron .",
+    "dev": "npm run start:electron"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "@staratlas/factory": "^0.7.1",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "electron": "^42.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
