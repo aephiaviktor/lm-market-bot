@@ -1,7 +1,10 @@
 const fields = [
+  'FACTION',
   'AEPHIA_API_KEY',
   'RPC_URL',
   'HOT_WALLET_SECRET',
+  'OWNER_WALLET',
+  'OWNER_PROFILE',
   'RPC_REQUESTS_PER_SECOND',
   'RPC_TX_SEND_RATE_LIMIT_PER_SECOND',
   'CHAIN_STATUS_REFRESH_INTERVAL_MINUTES',
@@ -12,9 +15,12 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.1.1';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
+  'FACTION',
+  'OWNER_WALLET',
+  'OWNER_PROFILE',
   'RPC_URL',
   'RPC_URL_FALLBACK',
   'HOT_WALLET_SECRET',
@@ -43,6 +49,9 @@ const addRuleRowBtn = document.getElementById('add-rule-row-btn');
 const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
 const assetRulesBody = document.getElementById('asset-rules-body');
 const assetRulePriceHeader = document.getElementById('asset-rule-price-header');
+const displayHotWalletAddress = document.getElementById('display-hot-wallet-address');
+const displayManagedWallet = document.getElementById('display-managed-wallet');
+const displayPlayerProfile = document.getElementById('display-player-profile');
 let assetRegistryResourceList = '';
 const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
 const tabPanels = Array.from(document.querySelectorAll('.tab-panel'));
@@ -88,6 +97,17 @@ const SHIP_END = 'Rainbow Phi';
 const SHIP_PARTS_START = 'Fimbul Airbike (ship parts)';
 const SHIP_PARTS_END = 'Rainbow Phi (ship parts)';
 const ASSET_RULE_GROUPS = new Set(['raw', 'components', 'ships', 'ship-parts']);
+
+function shortKey(value) {
+  const text = String(value ?? '').trim();
+  return text.length > 14 ? `${text.slice(0, 6)}...${text.slice(-6)}` : text;
+}
+
+function setDisplayKey(element, value) {
+  const text = String(value ?? '').trim();
+  element.textContent = text ? shortKey(text) : '—';
+  element.title = text;
+}
 
 function setRunning(running) {
   startBtn.disabled = running;
@@ -525,6 +545,29 @@ function writeFormConfig(config) {
     if (element) {
       element.value = config[key] ?? '';
     }
+  }
+  void updateDisplayAccounts();
+}
+
+async function updateDisplayAccounts() {
+  const managedWallet = form.elements.namedItem('OWNER_WALLET')?.value ?? '';
+  const playerProfile = form.elements.namedItem('OWNER_PROFILE')?.value ?? '';
+  const hotWalletSecret = form.elements.namedItem('HOT_WALLET_SECRET')?.value ?? '';
+
+  setDisplayKey(displayManagedWallet, managedWallet);
+  setDisplayKey(displayPlayerProfile, playerProfile);
+
+  if (!String(hotWalletSecret).trim()) {
+    setDisplayKey(displayHotWalletAddress, '');
+    return;
+  }
+
+  const result = await window.botApi.deriveHotWallet(hotWalletSecret);
+  if (result?.ok && result.address) {
+    setDisplayKey(displayHotWalletAddress, result.address);
+  } else {
+    displayHotWalletAddress.textContent = 'Invalid secret';
+    displayHotWalletAddress.title = result?.error || '';
   }
 }
 
@@ -1176,6 +1219,12 @@ addRuleRowBtn.addEventListener('click', () => {
 toggleSensitiveBtn.addEventListener('click', () => {
   setSensitiveVisible(!sensitiveVisible);
 });
+
+for (const key of ['HOT_WALLET_SECRET', 'OWNER_WALLET', 'OWNER_PROFILE']) {
+  form.elements.namedItem(key)?.addEventListener('input', () => {
+    void updateDisplayAccounts();
+  });
+}
 
 for (const button of tabButtons) {
   button.addEventListener('click', () => {

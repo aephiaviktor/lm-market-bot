@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs/promises');
 const os = require('os');
 const { spawn } = require('child_process');
+const { Keypair } = require('@solana/web3.js');
+const bs58 = require('bs58');
 const packageJson = require('../package.json');
 
 app.disableHardwareAcceleration();
@@ -64,6 +66,35 @@ function installApplicationMenu() {
 
 function getAppRoot() {
   return path.resolve(__dirname, '..');
+}
+
+function decodeWalletSecret(secret) {
+  const trimmed = String(secret || '').trim();
+  if (!trimmed) {
+    throw new Error('Hot wallet secret is empty.');
+  }
+
+  if (trimmed.startsWith('[')) {
+    const parsed = JSON.parse(trimmed);
+    if (!Array.isArray(parsed)) {
+      throw new Error('Hot wallet secret JSON value must be an array.');
+    }
+    return Uint8Array.from(parsed);
+  }
+
+  const hexLike = trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed;
+  if (/^[0-9a-fA-F]+$/.test(hexLike)) {
+    if (hexLike.length % 2 !== 0) {
+      throw new Error('Hot wallet secret hex value must have an even length.');
+    }
+    return Uint8Array.from(Buffer.from(hexLike, 'hex'));
+  }
+
+  return (bs58.decode || bs58.default.decode)(trimmed);
+}
+
+function getHotWalletAddressFromSecret(secret) {
+  return Keypair.fromSecretKey(decodeWalletSecret(secret)).publicKey.toBase58();
 }
 
 async function readPackageVersion() {
@@ -523,6 +554,14 @@ ipcMain.handle('settings:save', async (_event, payload) => {
     config,
     assetRules: normalizeAssetRules(saved.ASSET_RULE_ROWS),
   };
+});
+
+ipcMain.handle('settings:derive-hot-wallet', async (_event, secret) => {
+  try {
+    return { ok: true, address: getHotWalletAddressFromSecret(secret) };
+  } catch (err) {
+    return { ok: false, address: '', error: err?.message || String(err) };
+  }
 });
 
 ipcMain.handle('bot:start', async () => {

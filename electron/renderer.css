@@ -692,6 +692,37 @@ h3 {
   text-align: left;
 }
 
+.display-account-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.display-account {
+  border: 1px solid #1b3347;
+  border-radius: 8px;
+  background: rgba(6, 20, 32, 0.76);
+  padding: 10px;
+  min-width: 0;
+}
+
+.display-account span {
+  display: block;
+  color: #8fb4cc;
+  font-size: 12px;
+  margin-bottom: 5px;
+}
+
+.display-account strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #eef8ff;
+}
+
 .config-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

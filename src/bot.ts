@@ -175,6 +175,9 @@ export type AssetRuleConfig = {
 
 export type BotInputConfig = {
   AEPHIA_API_KEY?: string;
+  FACTION?: string;
+  OWNER_WALLET?: string;
+  OWNER_PROFILE?: string;
   RPC_URL?: string;
   RPC_URL_FALLBACK?: string;
   HOT_WALLET_SECRET?: string;
@@ -349,6 +352,9 @@ const defaultLogger: BotLogger = {
 
 export const EDITABLE_CONFIG_KEYS = [
   'AEPHIA_API_KEY',
+  'FACTION',
+  'OWNER_WALLET',
+  'OWNER_PROFILE',
   'RPC_URL',
   'RPC_URL_FALLBACK',
   'HOT_WALLET_SECRET',
@@ -368,6 +374,9 @@ export type EditableConfig = Record<(typeof EDITABLE_CONFIG_KEYS)[number], strin
 export function getEditableConfigFromEnv(env: Partial<Record<string, string | undefined>> = {}): EditableConfig {
   return {
     AEPHIA_API_KEY: env.AEPHIA_API_KEY ?? '',
+    FACTION: env.FACTION ?? 'ONI',
+    OWNER_WALLET: env.OWNER_WALLET ?? '',
+    OWNER_PROFILE: env.OWNER_PROFILE ?? '',
     RPC_URL: env.RPC_URL ?? 'https://api.mainnet-beta.solana.com',
     RPC_URL_FALLBACK: env.RPC_URL_FALLBACK ?? '',
     HOT_WALLET_SECRET: env.HOT_WALLET_SECRET ?? '',
@@ -387,6 +396,9 @@ export function getEditableConfigFromEnv(env: Partial<Record<string, string | un
 export function buildBotConfig(input: BotInputConfig): BotConfig {
   const editable = getEditableConfigFromEnv({
     AEPHIA_API_KEY: input.AEPHIA_API_KEY as string | undefined,
+    FACTION: input.FACTION as string | undefined,
+    OWNER_WALLET: input.OWNER_WALLET as string | undefined,
+    OWNER_PROFILE: input.OWNER_PROFILE as string | undefined,
     RPC_URL: input.RPC_URL as string | undefined,
     RPC_URL_FALLBACK: input.RPC_URL_FALLBACK as string | undefined,
     HOT_WALLET_SECRET: input.HOT_WALLET_SECRET as string | undefined,

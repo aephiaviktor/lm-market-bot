@@ -76,7 +76,30 @@
                   <button id="toggle-sensitive-btn" type="button">Show Sensitive Fields</button>
                 </div>
 
+                <div class="display-account-grid">
+                  <div class="display-account">
+                    <span>Hot Wallet Address</span>
+                    <strong id="display-hot-wallet-address">—</strong>
+                  </div>
+                  <div class="display-account">
+                    <span>Managed Wallet</span>
+                    <strong id="display-managed-wallet">—</strong>
+                  </div>
+                  <div class="display-account">
+                    <span>Player Profile</span>
+                    <strong id="display-player-profile">—</strong>
+                  </div>
+                </div>
+
                 <div class="config-grid">
+                  <label>
+                    Faction
+                    <select name="FACTION">
+                      <option value="ONI">ONI</option>
+                      <option value="MUD">MUD</option>
+                      <option value="USTUR">USTUR</option>
+                    </select>
+                  </label>
                   <label>
                     Aephia API Key
                     <input class="sensitive-field" name="AEPHIA_API_KEY" type="text" autocomplete="off" />
@@ -85,9 +108,17 @@
                     RPC URL
                     <input class="sensitive-field" name="RPC_URL" type="text" autocomplete="off" />
                   </label>
-                  <label class="config-wide">
+                  <label>
                     Hot Wallet Secret
                     <textarea class="sensitive-field" name="HOT_WALLET_SECRET" rows="3"></textarea>
+                  </label>
+                  <label>
+                    Managed Wallet
+                    <input class="sensitive-field" name="OWNER_WALLET" type="text" autocomplete="off" />
+                  </label>
+                  <label>
+                    Player Profile
+                    <input class="sensitive-field" name="OWNER_PROFILE" type="text" autocomplete="off" />
                   </label>
                   <label>
                     Requests / sec (Helius free plan is limited to 10 Requests / sec)
@@ -214,7 +245,7 @@
         <h2 id="update-dialog-title">LM Market Bot Update</h2>
         <div class="update-version-grid">
           <span>Current version</span>
-          <strong id="update-current-version">v0.1.0</strong>
+          <strong id="update-current-version">v0.1.1</strong>
           <span>Latest GitHub version</span>
           <strong id="update-latest-version">Checking...</strong>
         </div>

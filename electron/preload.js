@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('botApi', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
   saveSettings: (config) => ipcRenderer.invoke('settings:save', config),
+  deriveHotWallet: (secret) => ipcRenderer.invoke('settings:derive-hot-wallet', secret),
   startBot: () => ipcRenderer.invoke('bot:start'),
   stopBot: () => ipcRenderer.invoke('bot:stop'),
   applyRunningSettings: (payload) => ipcRenderer.invoke('bot:apply-running-settings', payload),
