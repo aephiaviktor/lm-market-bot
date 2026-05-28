@@ -994,9 +994,9 @@ export class LmMarketBot {
       () => this.config.rpcRequestsPerSecond,
     );
     this.resourceListResources = parseResources(config.resourceList);
-    this.legacyResources = config.assetRules.length > 0 ? [] : this.resourceListResources;
-    this.trackedResources = config.assetRules.length > 0 ? parseRuleResources(config.assetRules) : this.legacyResources;
-    this.statusResources = config.assetRules.length > 0 ? this.trackedResources : this.resourceListResources;
+    this.legacyResources = [];
+    this.trackedResources = parseRuleResources(config.assetRules);
+    this.statusResources = this.trackedResources;
     this.analysisPath = path.resolve(process.cwd(), config.analysisDir);
     this.logFilePath = path.join(this.analysisPath, 'orders-log.jsonl');
     this.stateFilePath = path.join(this.analysisPath, 'bot-state.json');
@@ -1021,9 +1021,9 @@ export class LmMarketBot {
     this.config.assetRules = next.assetRules;
 
     this.resourceListResources = parseResources(this.config.resourceList);
-    this.legacyResources = this.config.assetRules.length > 0 ? [] : this.resourceListResources;
-    this.trackedResources = this.config.assetRules.length > 0 ? parseRuleResources(this.config.assetRules) : this.legacyResources;
-    this.statusResources = this.config.assetRules.length > 0 ? this.trackedResources : this.resourceListResources;
+    this.legacyResources = [];
+    this.trackedResources = parseRuleResources(this.config.assetRules);
+    this.statusResources = this.trackedResources;
     this.checkIntervalMs = this.config.checkIntervalMinutes * 60 * 1000;
     this.passiveOpenOrdersCache.clear();
     this.marketLeaderCache.clear();
@@ -1062,7 +1062,7 @@ export class LmMarketBot {
       );
     } else {
       this.logger.info(
-        `Monitoring ${this.legacyResources.map((r) => r.name).join(', ')} every ${this.config.checkIntervalMinutes} minutes. Minimum price ${this.config.minPrice} ATLAS. Minimum order size ${this.config.minSellQuantity}.`,
+        `No asset rules configured. LM Market Bot will not scan markets until at least one asset rule is added.`,
       );
     }
 

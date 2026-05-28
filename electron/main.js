@@ -25,6 +25,15 @@ const GITHUB_REPO = 'aephiaviktor/lm-market-bot';
 const GITHUB_MAIN_PACKAGE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/package.json`;
 const GITHUB_MAIN_ARCHIVE_URL = `https://github.com/${GITHUB_REPO}/archive/refs/heads/main.tar.gz`;
 const APP_DISPLAY_NAME = 'LM Market Bot';
+const APP_USER_MODEL_ID = 'com.aephia.lm-market-bot';
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+
+function getWindowIconPath() {
+  return path.join(__dirname, 'assets', process.platform === 'win32' ? 'market_bot_icon.ico' : 'market_bot_icon.png');
+}
 
 function installApplicationMenu() {
   const appVersion = packageJson.version || 'unknown';
@@ -520,18 +529,23 @@ async function rerunAssetGroups(newConfig, assets) {
 }
 
 function createWindow() {
+  const iconPath = getWindowIconPath();
   mainWindow = new BrowserWindow({
     width: 1460,
     height: 900,
     minWidth: 1180,
     minHeight: 760,
-    icon: path.join(__dirname, 'assets', 'market_bot_icon.png'),
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  if (typeof mainWindow.setIcon === 'function') {
+    mainWindow.setIcon(iconPath);
+  }
 
   mainWindow.loadFile(path.join(__dirname, 'renderer.html'));
 }
