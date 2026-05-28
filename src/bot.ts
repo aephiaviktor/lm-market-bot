@@ -297,9 +297,11 @@ export type BotOpenOrderStatus = {
 };
 
 export type BotInventoryStatus = {
+  starbase: string;
   asset: string;
   mint: string;
   balance: number;
+  source: 'starbase-cargo-pod';
 };
 
 export type BotRecentActivity = {
@@ -786,6 +788,31 @@ function normalizeAssetKey(asset: string): string {
   return `${name.toLowerCase()}:${mint}`;
 }
 
+function normalizeStarbaseName(starbase: string): string {
+  return String(starbase ?? '').trim().replace(/_/g, '-').toUpperCase();
+}
+
+function getStarbaseSortRank(starbase: string): number {
+  const normalized = normalizeStarbaseName(starbase);
+  const match = normalized.match(/^([A-Z]+)-(\d+)$/);
+  if (!match) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  const [, prefix, rawNumber] = match;
+  const zoneRank = prefix === 'MUD' || prefix === 'ONI' || prefix === 'UST' ? 1000 : prefix === 'MRZ' ? 2000 : 3000;
+  return zoneRank + Number(rawNumber);
+}
+
+function compareStarbaseLabels(a: string, b: string): number {
+  const rankA = getStarbaseSortRank(a);
+  const rankB = getStarbaseSortRank(b);
+  if (rankA !== rankB) {
+    return rankA - rankB;
+  }
+  return normalizeStarbaseName(a).localeCompare(normalizeStarbaseName(b), undefined, { numeric: true });
+}
+
 function groupRulesByAsset(rules: AssetRuleConfig[]): Map<string, GroupedAssetRules> {
   const grouped = new Map<string, GroupedAssetRules>();
 
@@ -1089,13 +1116,7 @@ export class LmMarketBot {
     const atlasBalance = await this.getWalletBalanceForMint(QUOTE_ATLAS_MINT, 'ATLAS', { refresh: true });
     const usdcBalance = await this.getWalletBalanceForMint(QUOTE_USDC_MINT, 'USDC', { refresh: true });
 
-    const inventory = await Promise.all(
-      this.trackedResources.map(async (resource) => ({
-        asset: getResourceLabel(resource),
-        mint: resource.mint.toBase58(),
-        balance: await this.getWalletBalanceForMint(resource.mint, resource.name, { refresh: true }),
-      })),
-    );
+    const inventory = await this.buildInventorySnapshot();
 
     const openOrders = await this.buildOpenOrdersSnapshot();
     const recentActivity = await this.readRecentActivity(this.startedAt);
@@ -1190,6 +1211,44 @@ export class LmMarketBot {
       });
       return { ok: false, status: 'error', asset, side: normalizedSide, message };
     }
+  }
+
+  private async buildInventorySnapshot(): Promise<BotInventoryStatus[]> {
+    const seen = new Set<string>();
+    const rows: BotInventoryStatus[] = [];
+
+    for (const rule of this.config.assetRules) {
+      const resource = resolveResourceForRule(rule);
+      const starbase = rule.starbase;
+      const key = `${starbase}|${resource.mint.toBase58()}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      rows.push({
+        starbase,
+        asset: getResourceLabel(resource),
+        mint: resource.mint.toBase58(),
+        balance: await this.getStarbaseCargoPodBalance(rule, resource),
+        source: 'starbase-cargo-pod',
+      });
+    }
+
+    return rows.sort((a, b) => {
+      const starbaseCompare = compareStarbaseLabels(a.starbase, b.starbase);
+      if (starbaseCompare !== 0) {
+        return starbaseCompare;
+      }
+      return a.asset.localeCompare(b.asset, undefined, { numeric: true });
+    });
+  }
+
+  private async getStarbaseCargoPodBalance(_rule: AssetRuleConfig, _resource: ResourceConfig): Promise<number> {
+    // Local market inventory must come from the selected starbase cargo pod, not the hot wallet.
+    // The cargo-pod resolver lands with the SAGE certificate-minting flow; until then, avoid
+    // reporting wallet inventory as if it were local-market cargo.
+    return 0;
   }
 
   private async ensureAnalysisFiles() {

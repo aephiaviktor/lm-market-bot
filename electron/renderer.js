@@ -15,7 +15,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.1.3';
+const APP_VERSION = '0.1.4';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
   'FACTION',
@@ -779,11 +779,17 @@ function renderInventory(items) {
   setListCount(inventoryCountEl, visibleItems.length);
 
   if (!visibleItems.length) {
-    inventoryListEl.innerHTML = '<div class="empty-state">All tracked inventory is 0</div>';
+    inventoryListEl.innerHTML = '<div class="empty-state">All tracked cargo pod inventory is 0</div>';
     return;
   }
 
-  const sortedItems = sortByAssetRuleOrder(visibleItems, (item) => item?.asset);
+  const sortedItems = [...visibleItems].sort((a, b) => {
+    const starbaseComparison = compareStarbaseLabels(a?.starbase, b?.starbase);
+    if (starbaseComparison !== 0) {
+      return starbaseComparison;
+    }
+    return String(a?.asset || '').localeCompare(String(b?.asset || ''), undefined, { numeric: true });
+  });
 
   for (const itemData of sortedItems) {
     const item = document.createElement('div');
@@ -792,6 +798,7 @@ function renderInventory(items) {
     item.innerHTML = `
       <div class="status-item-top">
         <div class="inventory-left">
+          <span class="inventory-starbase">${itemData.starbase || '—'}</span>
           <span class="inventory-asset">${itemData.asset || itemData.mint || 'Unknown Asset'}</span>
         </div>
         <div class="inventory-right">
@@ -901,21 +908,23 @@ function collectAssetSignals(snapshot) {
   for (const item of inventory) {
     const asset = String(item?.asset || '').trim();
     if (!asset) continue;
-    const prev = signal.get(asset) || { inventoryBalance: null, openRemaining: 0, openCount: 0 };
+    const signalKey = `${String(item?.starbase || '').trim()}|${asset}`;
+    const prev = signal.get(signalKey) || { inventoryBalance: null, openRemaining: 0, openCount: 0, asset };
     prev.inventoryBalance = typeof item?.balance === 'number' ? item.balance : null;
-    signal.set(asset, prev);
+    signal.set(signalKey, prev);
   }
 
   const openOrders = Array.isArray(snapshot?.openOrders) ? snapshot.openOrders : [];
   for (const order of openOrders) {
     const asset = String(order?.asset || '').trim();
     if (!asset) continue;
-    const prev = signal.get(asset) || { inventoryBalance: null, openRemaining: 0, openCount: 0 };
+    const signalKey = `|${asset}`;
+    const prev = signal.get(signalKey) || { inventoryBalance: null, openRemaining: 0, openCount: 0, asset };
     prev.openCount += 1;
     if (typeof order?.remaining === 'number' && Number.isFinite(order.remaining)) {
       prev.openRemaining += order.remaining;
     }
-    signal.set(asset, prev);
+    signal.set(signalKey, prev);
   }
 
   return signal;
@@ -932,8 +941,8 @@ async function maybeAutoRerunFromStatus(snapshot, running) {
   const now = Date.now();
   const touched = new Set();
 
-  for (const [asset, next] of nextSignals.entries()) {
-    const prev = previousAssetSignals.get(asset);
+  for (const [signalKey, next] of nextSignals.entries()) {
+    const prev = previousAssetSignals.get(signalKey);
     if (!prev) continue;
 
     const inventoryChanged =
@@ -944,6 +953,7 @@ async function maybeAutoRerunFromStatus(snapshot, running) {
     const openCountChanged = (prev.openCount || 0) !== (next.openCount || 0);
 
     if (inventoryChanged || openRemainingChanged || openCountChanged) {
+      const asset = next.asset || signalKey.split('|').pop();
       const lastAt = assetLastRerunAtMs.get(asset) || 0;
       if (now - lastAt >= AUTO_RERUN_COOLDOWN_MS) {
         touched.add(asset);

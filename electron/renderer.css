@@ -456,6 +456,14 @@ h3 {
   color: #f3fbff;
 }
 
+.inventory-starbase {
+  min-width: 54px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #b8e2ff;
+  text-transform: uppercase;
+}
+
 .order-metric,
 .inventory-metric,
 .activity-metric,
