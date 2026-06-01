@@ -1,7 +1,7 @@
 import { Buffer } from 'buffer';
 import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import { GmClientService, Order, OrderSide } from '@staratlas/factory';
-import { getAssociatedTokenAddress } from '@solana/spl-token';
+import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
 import path from 'path';
@@ -14,6 +14,8 @@ import {
 import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './starbase-registry';
 
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
+const SAGE_PROGRAM_ID = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
+const CARGO_PROGRAM_ID = new PublicKey('Cargo2VNTPPTi9c1vq1Jw5d3BWUNr18MjRtSupAghKEk');
 const QUOTE_ATLAS_MINT = new PublicKey('ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx');
 const QUOTE_USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 const DEFAULT_IRON_ORE_MINT = 'FeorejFjRRAfusN9Fg3WjEZ1dRCf74o6xwT5vDt3R34J';
@@ -27,6 +29,10 @@ const STATUS_SNAPSHOT_CACHE_CEIL_MS = 300000;
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
 const DEFAULT_CHAIN_STATUS_REFRESH_INTERVAL_MINUTES = 5;
+const STARBASE_PLAYER_PROFILE_OFFSET = 9;
+const STARBASE_PLAYER_STARBASE_OFFSET = 73;
+const CARGO_POD_AUTHORITY_OFFSET = 41;
+const CARGO_POD_TOKEN_CACHE_TTL_MS = 60000;
 const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [2000, 5000, 10000];
 const SHIP_BUY_OUTBID_PCT = 0.005;
 const SHIP_PART_SUFFIX = ' (ship parts)';
@@ -226,6 +232,11 @@ type ResourceOrderState = {
 
 type BotState = Record<string, ResourceOrderState>;
 
+type CargoPodTokenBalanceCacheEntry = {
+  expiresAt: number;
+  balances: Map<string, number>;
+};
+
 type IndexedAssetRule = {
   index: number;
   rule: AssetRuleConfig;
@@ -263,6 +274,7 @@ export type CancelOrderResult =
 export type BotConfig = {
   rpcUrl: string;
   rpcUrlFallback?: string;
+  ownerProfile: string;
   hotWalletSecret: string;
   minSellQuantity: number;
   minPrice: number;
@@ -441,6 +453,7 @@ export function buildBotConfig(input: BotInputConfig): BotConfig {
   return {
     rpcUrl: editable.RPC_URL,
     rpcUrlFallback: editable.RPC_URL_FALLBACK || undefined,
+    ownerProfile: editable.OWNER_PROFILE,
     hotWalletSecret: editable.HOT_WALLET_SECRET,
     minSellQuantity,
     minPrice,
@@ -984,6 +997,30 @@ function getResourceLabel(resource: ResourceConfig): string {
   return resource.name || resource.mint.toBase58();
 }
 
+function parseTokenAmount(tokenAmount?: {
+  uiAmount?: number | null;
+  uiAmountString?: string;
+  amount?: string;
+  decimals?: number;
+}): number {
+  if (!tokenAmount) {
+    return 0;
+  }
+
+  if (typeof tokenAmount.uiAmountString === 'string' && tokenAmount.uiAmountString.trim()) {
+    const parsed = Number.parseFloat(tokenAmount.uiAmountString);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  if (typeof tokenAmount.uiAmount === 'number' && Number.isFinite(tokenAmount.uiAmount)) {
+    return tokenAmount.uiAmount;
+  }
+
+  const rawAmount = Number(tokenAmount.amount ?? '0');
+  const decimals = tokenAmount.decimals ?? 0;
+  return Number.isFinite(rawAmount) ? rawAmount / 10 ** decimals : 0;
+}
+
 function normalizeAssetRuleGroup(value: string | null | undefined, asset: string): AssetRegistryGroup {
   const normalized = String(value ?? '').trim();
   if (normalized === 'raw' || normalized === 'components' || normalized === 'ships' || normalized === 'ship-parts') {
@@ -1021,6 +1058,9 @@ export class LmMarketBot {
   private readonly passiveOpenOrdersCache = new Map<string, BotOpenOrderStatus[]>();
   private readonly marketLeaderCache = new Map<string, { expiresAt: number; bestBuyPrice: number | null; bestSellPrice: number | null }>();
   private readonly walletBalanceCache = new Map<string, number>();
+  private readonly starbasePlayerCache = new Map<string, PublicKey | null>();
+  private readonly cargoPodCache = new Map<string, PublicKey[]>();
+  private readonly cargoPodTokenBalanceCache = new Map<string, CargoPodTokenBalanceCacheEntry>();
   private solBalanceCache: number | null = null;
   private statusSnapshotCache: { expiresAt: number; snapshot: BotStatusSnapshot } | null = null;
   private transactionSubmissionQueue: Promise<void> = Promise.resolve();
@@ -1061,6 +1101,7 @@ export class LmMarketBot {
     this.config.checkIntervalMinutes = next.checkIntervalMinutes;
     this.config.relevantSellOrderPct = next.relevantSellOrderPct;
     this.config.relevantBuyOrderPct = next.relevantBuyOrderPct;
+    this.config.ownerProfile = next.ownerProfile;
     this.config.resourceList = next.resourceList;
     this.config.analysisDir = next.analysisDir;
     this.config.assetRules = next.assetRules;
@@ -1073,6 +1114,9 @@ export class LmMarketBot {
     this.passiveOpenOrdersCache.clear();
     this.marketLeaderCache.clear();
     this.walletBalanceCache.clear();
+    this.starbasePlayerCache.clear();
+    this.cargoPodCache.clear();
+    this.cargoPodTokenBalanceCache.clear();
     this.solBalanceCache = null;
     this.invalidateStatusSnapshotCache();
   }
@@ -1262,11 +1306,118 @@ export class LmMarketBot {
     });
   }
 
-  private async getStarbaseCargoPodBalance(_rule: AssetRuleConfig, _resource: ResourceConfig): Promise<number> {
-    // Local market inventory must come from the selected starbase cargo pod, not the hot wallet.
-    // The cargo-pod resolver lands with the SAGE certificate-minting flow; until then, avoid
-    // reporting wallet inventory as if it were local-market cargo.
-    return 0;
+  private async getStarbaseCargoPodBalance(rule: AssetRuleConfig, resource: ResourceConfig): Promise<number> {
+    const cargoPods = await this.getStarbaseCargoPods(rule.starbase);
+    if (cargoPods.length === 0) {
+      return 0;
+    }
+
+    const mintKey = resource.mint.toBase58();
+    let balance = 0;
+    for (const cargoPod of cargoPods) {
+      const tokenBalances = await this.getCargoPodTokenBalances(cargoPod);
+      balance += tokenBalances.get(mintKey) ?? 0;
+    }
+
+    return balance;
+  }
+
+  private async getStarbaseCargoPods(starbaseName: string): Promise<PublicKey[]> {
+    const starbasePlayer = await this.getStarbasePlayer(starbaseName);
+    if (!starbasePlayer) {
+      return [];
+    }
+
+    const cacheKey = starbasePlayer.toBase58();
+    const cached = this.cargoPodCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const accounts = await this.connection.getProgramAccounts(CARGO_PROGRAM_ID, {
+        commitment: 'confirmed',
+        filters: [{ memcmp: { offset: CARGO_POD_AUTHORITY_OFFSET, bytes: starbasePlayer.toBase58() } }],
+        dataSlice: { offset: 0, length: 0 },
+      });
+      const cargoPods = accounts.map((account) => account.pubkey);
+      this.cargoPodCache.set(cacheKey, cargoPods);
+      return cargoPods;
+    } catch (err) {
+      this.logger.warn(`Failed to resolve cargo pods for starbasePlayer ${starbasePlayer.toBase58()}`, err);
+      return [];
+    }
+  }
+
+  private async getStarbasePlayer(starbaseName: string): Promise<PublicKey | null> {
+    const starbase = findStarbaseRegistryEntry(starbaseName);
+    if (!starbase) {
+      return null;
+    }
+
+    const ownerProfile = this.config.ownerProfile.trim();
+    if (!ownerProfile) {
+      this.logger.warn('OWNER_PROFILE is not configured; cannot resolve starbase cargo pod inventory.');
+      return null;
+    }
+
+    const cacheKey = `${ownerProfile}:${starbase.publicKey}`;
+    if (this.starbasePlayerCache.has(cacheKey)) {
+      return this.starbasePlayerCache.get(cacheKey) ?? null;
+    }
+
+    try {
+      const ownerProfileKey = new PublicKey(ownerProfile);
+      const starbaseKey = new PublicKey(starbase.publicKey);
+      const accounts = await this.connection.getProgramAccounts(SAGE_PROGRAM_ID, {
+        commitment: 'confirmed',
+        filters: [
+          { memcmp: { offset: STARBASE_PLAYER_PROFILE_OFFSET, bytes: ownerProfileKey.toBase58() } },
+          { memcmp: { offset: STARBASE_PLAYER_STARBASE_OFFSET, bytes: starbaseKey.toBase58() } },
+        ],
+        dataSlice: { offset: 0, length: 0 },
+      });
+      const starbasePlayer = accounts[0]?.pubkey ?? null;
+      this.starbasePlayerCache.set(cacheKey, starbasePlayer);
+      return starbasePlayer;
+    } catch (err) {
+      this.logger.warn(`Failed to resolve starbasePlayer for ${starbaseName}`, err);
+      this.starbasePlayerCache.set(cacheKey, null);
+      return null;
+    }
+  }
+
+  private async getCargoPodTokenBalances(cargoPod: PublicKey): Promise<Map<string, number>> {
+    const cacheKey = cargoPod.toBase58();
+    const cached = this.cargoPodTokenBalanceCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.balances;
+    }
+
+    const balances = new Map<string, number>();
+    try {
+      const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
+      for (const tokenAccount of tokenAccounts.value) {
+        const parsed = tokenAccount.account.data.parsed as {
+          info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
+        };
+        const mint = parsed.info?.mint;
+        if (!mint) {
+          continue;
+        }
+        const tokenAmount = parsed.info?.tokenAmount;
+        const amount = parseTokenAmount(tokenAmount);
+        balances.set(mint, (balances.get(mint) ?? 0) + amount);
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to fetch cargo pod token balances for ${cacheKey}`, err);
+    }
+
+    this.cargoPodTokenBalanceCache.set(cacheKey, {
+      expiresAt: Date.now() + CARGO_POD_TOKEN_CACHE_TTL_MS,
+      balances,
+    });
+    return balances;
   }
 
   private async ensureAnalysisFiles() {
