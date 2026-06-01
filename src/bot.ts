@@ -506,8 +506,16 @@ export function parseAssetRules(input?: AssetRuleInput[] | null): AssetRuleConfi
   }
 
   return input
-    .filter((rule) => String(rule?.asset ?? '').trim())
+    .filter(isRunnableAssetRuleInput)
     .map((rule, index) => parseAssetRule(rule, index));
+}
+
+function isRunnableAssetRuleInput(rule: AssetRuleInput | null | undefined): rule is AssetRuleInput {
+  return Boolean(
+    String(rule?.asset ?? '').trim() &&
+      String(rule?.quantity ?? '').trim() &&
+      String(rule?.price ?? '').trim(),
+  );
 }
 
 export function parseAssetRule(input: AssetRuleInput, index?: number): AssetRuleConfig {
