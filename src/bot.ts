@@ -1,5 +1,5 @@
 import { Buffer } from 'buffer';
-import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SendTransactionError, Transaction } from '@solana/web3.js';
 import { AnchorProvider, BN, Program, Wallet } from '@staratlas/anchor';
 import { CargoType, CARGO_IDL, type CargoIDLProgram } from '@staratlas/cargo';
 import { keypairToAsyncSigner } from '@staratlas/data-source';
@@ -117,6 +117,28 @@ function getErrorText(error: unknown): string {
 function isRpcRateLimitError(error: unknown): boolean {
   const text = getErrorText(error).toLowerCase();
   return text.includes('429') || text.includes('too many requests') || text.includes('rate limit');
+}
+
+async function getSendTransactionLogs(error: unknown, connection: Connection): Promise<string[] | null> {
+  if (error instanceof SendTransactionError) {
+    try {
+      return await error.getLogs(connection);
+    } catch {
+      return error.logs ?? error.transactionError.logs ?? null;
+    }
+  }
+
+  const maybeGetLogs = (error as { getLogs?: unknown } | null)?.getLogs;
+  if (typeof maybeGetLogs === 'function') {
+    try {
+      const logs = await maybeGetLogs.call(error, connection);
+      return Array.isArray(logs) ? logs.map(String) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 async function callRpcWithRateLimitRetry<T>(
@@ -1829,6 +1851,14 @@ export class LmMarketBot {
       try {
         const signature = await this.connection.sendRawTransaction(transaction.serialize());
         return { signature, blockhash, lastValidBlockHeight };
+      } catch (error) {
+        const logs = await getSendTransactionLogs(error, this.connection);
+        if (logs?.length) {
+          this.logger.error(`Solana transaction failed before confirmation. Full transaction logs:\n${logs.join('\n')}`);
+        } else {
+          this.logger.error('Solana transaction failed before confirmation and no transaction logs were available.');
+        }
+        throw error;
       } finally {
         this.nextTransactionSubmitAtMs = Date.now() + 1000 / this.config.rpcTxSendRateLimitPerSecond;
       }
