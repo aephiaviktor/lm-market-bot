@@ -1,7 +1,23 @@
 import { Buffer } from 'buffer';
 import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import { AnchorProvider, BN, Program, Wallet } from '@staratlas/anchor';
+import { CargoType, CARGO_IDL, type CargoIDLProgram } from '@staratlas/cargo';
+import { keypairToAsyncSigner } from '@staratlas/data-source';
 import { GmClientService, Order, OrderSide } from '@staratlas/factory';
-import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddress,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
+import { PROFILE_FACTION_IDL, ProfileFactionAccount, type ProfileFactionIDLProgram } from '@staratlas/profile-faction';
+import {
+  findCertificateMintAddress,
+  SAGE_IDL,
+  Starbase,
+  StarbasePlayer,
+  type SageIDLProgram,
+} from '@staratlas/sage';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
 import path from 'path';
@@ -16,6 +32,9 @@ import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './star
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
 const SAGE_PROGRAM_ID = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
 const CARGO_PROGRAM_ID = new PublicKey('Cargo2VNTPPTi9c1vq1Jw5d3BWUNr18MjRtSupAghKEk');
+const PROFILE_FACTION_PROGRAM_ID = new PublicKey('pFACzkX2eSpAjDyEohD6i3VRJvREtH9ynbtM1DwVFsj');
+const SAGE_MARKET_HOOK_PROGRAM_ID = new PublicKey('hooKwBRKyzBqxVZFQVpLMKGexhmc6ZNaRAbwWi8uMok');
+const CARGO_STATS_DEFINITION = new PublicKey('CSTatsVpHbvZmwHbCjZKVfYQT5JXfsXccXufhEcwCqTg');
 const QUOTE_ATLAS_MINT = new PublicKey('ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx');
 const QUOTE_USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 const DEFAULT_IRON_ORE_MINT = 'FeorejFjRRAfusN9Fg3WjEZ1dRCf74o6xwT5vDt3R34J';
@@ -258,6 +277,22 @@ type BotState = Record<string, ResourceOrderState>;
 type CargoPodTokenBalanceCacheEntry = {
   expiresAt: number;
   balances: Map<string, number>;
+};
+
+type LocalMarketSellContext = {
+  rawResource: ResourceConfig;
+  certificateResource: ResourceConfig;
+  starbase: PublicKey;
+  starbasePlayer: PublicKey;
+  cargoPod: PublicKey;
+  cargoTokenAccount: PublicKey;
+  starbaseCargoTokenAccount: PublicKey;
+  cargoType: PublicKey;
+  certificateMint: PublicKey;
+  certificateTokenAccount: PublicKey;
+  gameId: PublicKey;
+  gameState: PublicKey;
+  profileFaction: PublicKey;
 };
 
 type IndexedAssetRule = {
@@ -1019,6 +1054,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getProgramIdlWithoutEvents(idl: unknown): any {
+  return { ...(idl as Record<string, unknown>), events: [] };
+}
+
 function getResourceLabel(resource: ResourceConfig): string {
   return resource.name || resource.mint.toBase58();
 }
@@ -1068,6 +1107,9 @@ export class LmMarketBot {
   private readonly connection: Connection;
   private readonly wallet: Keypair;
   private readonly gm = new GmClientService();
+  private readonly sageProgram: SageIDLProgram & { account: any };
+  private readonly cargoProgram: CargoIDLProgram;
+  private readonly profileFactionProgram: ProfileFactionIDLProgram;
   private readonly analysisPath: string;
   private readonly logFilePath: string;
   private readonly stateFilePath: string;
@@ -1086,6 +1128,7 @@ export class LmMarketBot {
   private readonly marketOrderSnapshotCache = new Map<string, MarketOrderSnapshotCacheEntry>();
   private readonly myOpenOrdersCache = new Map<string, MyOpenOrdersCacheEntry>();
   private readonly walletBalanceCache = new Map<string, number>();
+  private readonly localMarketSellContextCache = new Map<string, LocalMarketSellContext | null>();
   private readonly starbasePlayerCache = new Map<string, PublicKey | null>();
   private readonly cargoPodCache = new Map<string, PublicKey[]>();
   private readonly cargoPodTokenBalanceCache = new Map<string, CargoPodTokenBalanceCacheEntry>();
@@ -1109,6 +1152,22 @@ export class LmMarketBot {
       this.logger,
       () => this.config.rpcRequestsPerSecond,
     );
+    const provider = new AnchorProvider(this.connection, new Wallet(this.wallet), AnchorProvider.defaultOptions());
+    this.sageProgram = new Program(
+      getProgramIdlWithoutEvents(SAGE_IDL),
+      SAGE_PROGRAM_ID,
+      provider,
+    ) as unknown as SageIDLProgram & { account: any };
+    this.cargoProgram = new Program(
+      getProgramIdlWithoutEvents(CARGO_IDL),
+      CARGO_PROGRAM_ID,
+      provider,
+    ) as unknown as CargoIDLProgram;
+    this.profileFactionProgram = new Program(
+      getProgramIdlWithoutEvents(PROFILE_FACTION_IDL),
+      PROFILE_FACTION_PROGRAM_ID,
+      provider,
+    ) as unknown as ProfileFactionIDLProgram;
     this.resourceListResources = parseResources(config.resourceList);
     this.legacyResources = [];
     this.trackedResources = parseRuleResources(config.assetRules);
@@ -1147,6 +1206,7 @@ export class LmMarketBot {
     this.marketOrderSnapshotCache.clear();
     this.myOpenOrdersCache.clear();
     this.walletBalanceCache.clear();
+    this.localMarketSellContextCache.clear();
     this.starbasePlayerCache.clear();
     this.cargoPodCache.clear();
     this.cargoPodTokenBalanceCache.clear();
@@ -1354,6 +1414,38 @@ export class LmMarketBot {
     return balance;
   }
 
+  private async getStarbaseCargoPodTokenAccount(
+    rule: AssetRuleConfig,
+    resource: ResourceConfig,
+  ): Promise<{ cargoPod: PublicKey; tokenAccount: PublicKey; balance: number } | null> {
+    const cargoPods = await this.getStarbaseCargoPods(rule.starbase);
+    const mintKey = resource.mint.toBase58();
+
+    for (const cargoPod of cargoPods) {
+      try {
+        const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
+        for (const tokenAccount of tokenAccounts.value) {
+          const parsed = tokenAccount.account.data.parsed as {
+            info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
+          };
+          if (parsed.info?.mint !== mintKey) {
+            continue;
+          }
+
+          return {
+            cargoPod,
+            tokenAccount: tokenAccount.pubkey,
+            balance: parseTokenAmount(parsed.info.tokenAmount),
+          };
+        }
+      } catch (err) {
+        this.logger.warn(`Failed to fetch cargo pod token account for ${cargoPod.toBase58()}`, err);
+      }
+    }
+
+    return null;
+  }
+
   private async getStarbaseCargoPods(starbaseName: string): Promise<PublicKey[]> {
     const starbasePlayer = await this.getStarbasePlayer(starbaseName);
     if (!starbasePlayer) {
@@ -1452,6 +1544,154 @@ export class LmMarketBot {
     return balances;
   }
 
+  private async resolveLocalMarketSellContext(
+    rule: AssetRuleConfig,
+    rawResource: ResourceConfig,
+  ): Promise<LocalMarketSellContext | null> {
+    const cacheKey = `${rule.starbase}:${rawResource.mint.toBase58()}`;
+    if (this.localMarketSellContextCache.has(cacheKey)) {
+      return this.localMarketSellContextCache.get(cacheKey) ?? null;
+    }
+
+    const starbaseEntry = findStarbaseRegistryEntry(rule.starbase);
+    const starbasePlayer = await this.getStarbasePlayer(rule.starbase);
+    const cargoToken = await this.getStarbaseCargoPodTokenAccount(rule, rawResource);
+    if (!starbaseEntry || !starbasePlayer || !cargoToken) {
+      this.localMarketSellContextCache.set(cacheKey, null);
+      return null;
+    }
+
+    const starbase = new PublicKey(starbaseEntry.publicKey);
+    const starbaseAccount = await this.sageProgram.account.starbase.fetch(starbase);
+    const gameId = starbaseAccount.gameId as PublicKey;
+    const gameAccount = await this.sageProgram.account.game.fetch(gameId);
+    const gameState = gameAccount.gameState as PublicKey;
+    const certificateMint = findCertificateMintAddress(
+      this.sageProgram,
+      starbase,
+      rawResource.mint,
+      Number(starbaseAccount.seqId),
+    )[0];
+    const cargoType = CargoType.findAddress(this.cargoProgram, CARGO_STATS_DEFINITION, rawResource.mint, 0)[0];
+    const certificateTokenAccount = await getAssociatedTokenAddress(
+      certificateMint,
+      this.wallet.publicKey,
+      false,
+      TOKEN_2022_PROGRAM_ID,
+    );
+    const starbaseCargoTokenAccount = await getAssociatedTokenAddress(rawResource.mint, starbase, true);
+    const profileFaction = ProfileFactionAccount.findAddress(
+      this.profileFactionProgram,
+      new PublicKey(this.config.ownerProfile),
+    )[0];
+
+    const context: LocalMarketSellContext = {
+      rawResource,
+      certificateResource: {
+        name: rawResource.name,
+        mint: certificateMint,
+      },
+      starbase,
+      starbasePlayer,
+      cargoPod: cargoToken.cargoPod,
+      cargoTokenAccount: cargoToken.tokenAccount,
+      starbaseCargoTokenAccount,
+      cargoType,
+      certificateMint,
+      certificateTokenAccount,
+      gameId,
+      gameState,
+      profileFaction,
+    };
+    this.localMarketSellContextCache.set(cacheKey, context);
+    return context;
+  }
+
+  private async ensureCertificateMint(context: LocalMarketSellContext): Promise<void> {
+    const certificateMintAccount = await this.connection.getAccountInfo(context.certificateMint, 'confirmed');
+    if (certificateMintAccount) {
+      return;
+    }
+
+    this.logger.info(`Creating local-market certificate mint for ${context.rawResource.name} at ${context.starbase.toBase58()}.`);
+    const transaction = new Transaction();
+    const createCertificateMint = await Starbase.createCertificateMint(
+      this.sageProgram,
+      SAGE_MARKET_HOOK_PROGRAM_ID,
+      context.starbase,
+      context.rawResource.mint,
+      context.certificateMint,
+      context.cargoType,
+      context.gameId,
+    )(keypairToAsyncSigner(this.wallet));
+
+    for (const item of Array.isArray(createCertificateMint) ? createCertificateMint : [createCertificateMint]) {
+      transaction.add(item.instruction);
+    }
+
+    await this.signAndSend(transaction);
+  }
+
+  private async mintLocalMarketCertificates(context: LocalMarketSellContext, quantity: number): Promise<void> {
+    if (quantity <= 0) {
+      return;
+    }
+
+    await this.ensureCertificateMint(context);
+
+    const transaction = new Transaction().add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        this.wallet.publicKey,
+        context.certificateTokenAccount,
+        this.wallet.publicKey,
+        context.certificateMint,
+        TOKEN_2022_PROGRAM_ID,
+      ),
+    );
+
+    const mintCertificate = await StarbasePlayer.mintCertificate(
+      this.sageProgram,
+      this.cargoProgram,
+      context.starbasePlayer,
+      keypairToAsyncSigner(this.wallet),
+      new PublicKey(this.config.ownerProfile),
+      context.profileFaction,
+      context.starbase,
+      context.cargoPod,
+      context.cargoType,
+      CARGO_STATS_DEFINITION,
+      context.certificateTokenAccount,
+      context.certificateMint,
+      context.cargoTokenAccount,
+      context.starbaseCargoTokenAccount,
+      context.rawResource.mint,
+      context.gameId,
+      context.gameState,
+      {
+        amount: new BN(quantity),
+        keyIndex: 0,
+      },
+    )(keypairToAsyncSigner(this.wallet));
+
+    for (const item of Array.isArray(mintCertificate) ? mintCertificate : [mintCertificate]) {
+      transaction.add(item.instruction);
+    }
+
+    const sig = await this.signAndSend(transaction);
+    this.walletBalanceCache.delete(`${context.certificateMint.toBase58()}:${TOKEN_2022_PROGRAM_ID.toBase58()}`);
+    this.cargoPodTokenBalanceCache.delete(context.cargoPod.toBase58());
+
+    await this.appendLog({
+      event: 'MINT_CERTIFICATES',
+      side: 'sell',
+      resource: context.rawResource.name,
+      mint: context.rawResource.mint.toBase58(),
+      certificateMint: context.certificateMint.toBase58(),
+      quantity,
+      tx: sig,
+    });
+  }
+
   private async ensureAnalysisFiles() {
     await fs.mkdir(this.analysisPath, { recursive: true });
 
@@ -1542,14 +1782,15 @@ export class LmMarketBot {
   private async getWalletBalanceForMint(
     mint: PublicKey,
     resourceName: string,
-    options?: { refresh?: boolean },
+    options?: { refresh?: boolean; tokenProgramId?: PublicKey },
   ): Promise<number> {
-    const mintKey = mint.toBase58();
+    const tokenProgramId = options?.tokenProgramId ?? TOKEN_PROGRAM_ID;
+    const mintKey = `${mint.toBase58()}:${tokenProgramId.toBase58()}`;
     if (!options?.refresh && this.walletBalanceCache.has(mintKey)) {
       return this.walletBalanceCache.get(mintKey) ?? 0;
     }
 
-    const ata = await getAssociatedTokenAddress(mint, this.wallet.publicKey);
+    const ata = await getAssociatedTokenAddress(mint, this.wallet.publicKey, false, tokenProgramId);
     try {
       const balance = await this.connection.getTokenAccountBalance(ata);
       const amount = Number(balance.value.amount ?? '0');
@@ -1634,6 +1875,33 @@ export class LmMarketBot {
     return sig;
   }
 
+  private async getInitializeSellOrderTransaction(
+    depositMint: PublicKey,
+    receiveMint: PublicKey,
+    quantity: number,
+    price: unknown,
+    initializerDepositTokenAccount: PublicKey,
+  ): Promise<{ transaction: Transaction; signers: Keypair[] }> {
+    const { createInitializeSellOrderInstruction } = require('@staratlas/factory/dist/marketplace/instruction_builders/createOrder');
+    const { ixSet } = await createInitializeSellOrderInstruction({
+      connection: this.connection,
+      initializerMainAccount: this.wallet.publicKey,
+      initializerDepositTokenAccount,
+      price,
+      originationQty: quantity,
+      depositMint,
+      receiveMint,
+      programId: GM_PROGRAM_ID,
+    });
+
+    const transaction = new Transaction();
+    for (const instruction of ixSet.instructions) {
+      transaction.add(instruction);
+    }
+
+    return { transaction, signers: ixSet.signers };
+  }
+
   private async placeOrder(
     resource: ResourceConfig,
     side: AssetRuleSide,
@@ -1641,21 +1909,25 @@ export class LmMarketBot {
     quantity: number,
     cancelledIds: Set<string> = new Set<string>(),
     quoteMintOverride?: PublicKey,
+    sellDepositTokenAccount?: PublicKey,
   ) {
     const quoteMint = quoteMintOverride ?? getQuoteMintForResource(resource);
     const quoteSymbol = getQuoteSymbolForMint(quoteMint);
     this.logger.info(`Placing ${side} order for ${quantity} ${resource.name} @ ${targetPrice} ${quoteSymbol}`);
     const priceBn = await this.gm.getBnPriceForCurrency(this.connection, targetPrice, quoteMint, GM_PROGRAM_ID);
-    const { transaction, signers } = await this.gm.getInitializeOrderTransaction(
-      this.connection,
-      this.wallet.publicKey,
-      resource.mint,
-      quoteMint,
-      quantity,
-      priceBn,
-      GM_PROGRAM_ID,
-      getSideOrderType(side),
-    );
+    const { transaction, signers } =
+      side === 'sell' && sellDepositTokenAccount
+        ? await this.getInitializeSellOrderTransaction(resource.mint, quoteMint, quantity, priceBn, sellDepositTokenAccount)
+        : await this.gm.getInitializeOrderTransaction(
+            this.connection,
+            this.wallet.publicKey,
+            resource.mint,
+            quoteMint,
+            quantity,
+            priceBn,
+            GM_PROGRAM_ID,
+            getSideOrderType(side),
+          );
 
     const sig = await this.signAndSend(transaction, signers);
 
@@ -1905,20 +2177,29 @@ export class LmMarketBot {
   ) {
     this.logger.info(`[${new Date().toISOString()}] Checking ${resource.name} sell market...`);
     const cancelledIds = new Set<string>();
-    const { allOrdersRaw, myOrdersRaw } = marketOrderSnapshot ?? (await this.readMarketOrderSnapshot(resource));
+    const localMarketContext = rule ? await this.resolveLocalMarketSellContext(rule, resource) : null;
+    const sellResource = localMarketContext?.certificateResource ?? resource;
+    const sellDepositTokenAccount = localMarketContext?.certificateTokenAccount;
+    const { allOrdersRaw, myOrdersRaw } =
+      marketOrderSnapshot && sellResource.mint.equals(resource.mint)
+        ? marketOrderSnapshot
+        : await this.readMarketOrderSnapshot(sellResource);
 
-    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(resource);
+    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(sellResource);
     const allOrders = allOrdersRaw.filter((o) => o.orderType === OrderSide.Sell && isOrderForQuoteMint(o, quoteMint));
     const myOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Sell && isOrderForQuoteMint(o, quoteMint));
     const staleQuoteOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Sell && !isOrderForQuoteMint(o, quoteMint));
 
     for (const staleOrder of staleQuoteOrders) {
-      await this.cancelOrder(staleOrder, resource, 'sell', cancelledIds);
+      await this.cancelOrder(staleOrder, sellResource, 'sell', cancelledIds);
     }
 
-    await this.detectFills(resource, 'sell', myOrders, cancelledIds);
+    await this.detectFills(sellResource, 'sell', myOrders, cancelledIds);
 
-    const walletSellBalance = await this.getWalletBalanceForMint(resource.mint, resource.name, { refresh: true });
+    const walletSellBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
+      refresh: true,
+      tokenProgramId: localMarketContext ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
+    });
     const cargoSellBalance = rule ? await this.getStarbaseCargoPodBalance(rule, resource) : null;
     const relevantSellQuantity = getRelevantOrderThreshold(minSellQuantity, this.config.relevantSellOrderPct);
     const targetPrice = this.getTargetSellPrice(allOrders, minPrice, relevantSellQuantity);
@@ -1931,32 +2212,30 @@ export class LmMarketBot {
     const sortedMyOrders = [...myOrders].sort((a, b) => a.uiPrice - b.uiPrice);
     const activeOrder = sortedMyOrders[0];
     for (let i = 1; i < sortedMyOrders.length; i++) {
-      await this.cancelOrder(sortedMyOrders[i], resource, 'sell', cancelledIds);
+      await this.cancelOrder(sortedMyOrders[i], sellResource, 'sell', cancelledIds);
     }
 
     if (!activeOrder) {
-      if (walletSellBalance < minSellQuantity) {
-        const cargoMessage =
-          cargoSellBalance !== null && cargoSellBalance >= minSellQuantity
-            ? ` Starbase cargo has ${cargoSellBalance}, but GM sell orders require the hot wallet token account.`
-            : '';
-        this.logger.info(`Insufficient wallet ${resource.name} to place a new sell order.${cargoMessage} Skipping.`);
+      const availableToSell = Math.min(
+        Math.floor(walletSellBalance + (localMarketContext ? cargoSellBalance ?? 0 : 0)),
+        limit ?? Number.POSITIVE_INFINITY,
+      );
+      if (availableToSell < minSellQuantity) {
+        this.logger.info(`Insufficient ${resource.name} local-market sell inventory. Skipping.`);
         await this.appendLog({
           event: 'SKIP_NO_INVENTORY',
           side: 'sell',
           asset: rule?.asset,
-          resource: resource.name,
-          mint: resource.mint.toBase58(),
+          resource: sellResource.name,
+          mint: sellResource.mint.toBase58(),
           balance: walletSellBalance,
           cargoBalance: cargoSellBalance ?? undefined,
           minSellQuantity,
-          inventorySource: 'wallet',
-          message: cargoMessage.trim() || undefined,
+          inventorySource: localMarketContext ? 'starbase-cargo-pod' : 'wallet',
         });
         return;
       }
 
-      const availableToSell = Math.floor(walletSellBalance);
       const quantityToSell = Math.min(availableToSell, limit ?? availableToSell);
       if (quantityToSell < minSellQuantity) {
         this.logger.info(
@@ -1964,15 +2243,28 @@ export class LmMarketBot {
         );
         return;
       }
+      if (localMarketContext && walletSellBalance < quantityToSell) {
+        const certificateQuantity = quantityToSell - Math.floor(walletSellBalance);
+        this.logger.info(`Minting ${certificateQuantity} ${resource.name} local-market certificates before selling.`);
+        await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
+      }
       this.logger.info(`Planning to sell ${quantityToSell} ${resource.name} this cycle.`);
-      await this.placeOrder(resource, 'sell', targetPrice, quantityToSell, cancelledIds, quoteMint);
-      const postPlacementBalance = await this.syncPostPlacementWalletBalance(resource, 'sell');
+      await this.placeOrder(sellResource, 'sell', targetPrice, quantityToSell, cancelledIds, quoteMint, sellDepositTokenAccount);
+      const postPlacementBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
+        refresh: true,
+        tokenProgramId: localMarketContext ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
+      });
+      await this.setLastWalletBalance(sellResource, 'sell', postPlacementBalance);
       this.logger.info(`Stored sell wallet baseline for ${resource.name}: ${postPlacementBalance}`);
       return;
     }
 
     const activeQuantity = getOrderRemainingQuantity(activeOrder);
-    const freeAvailableQuantity = Math.max(0, Math.floor(walletSellBalance));
+    const walletAvailableQuantity = Math.max(0, Math.floor(walletSellBalance));
+    const freeAvailableQuantity = Math.max(
+      0,
+      Math.floor(walletSellBalance + (localMarketContext ? cargoSellBalance ?? 0 : 0)),
+    );
     const remainingSellAllowance = Math.max(0, (limit ?? Number.POSITIVE_INFINITY) - activeQuantity);
     const addableAvailableQuantity = Math.min(freeAvailableQuantity, remainingSellAllowance);
     const canTopUpToSellLimit =
@@ -2007,9 +2299,19 @@ export class LmMarketBot {
         );
       }
 
-      await this.cancelOrder(activeOrder, resource, 'sell', cancelledIds);
-      await this.placeOrder(resource, 'sell', targetPrice, nextQuantity, cancelledIds, quoteMint);
-      const postPlacementBalance = await this.syncPostPlacementWalletBalance(resource, 'sell');
+      if (localMarketContext && walletAvailableQuantity < addableAvailableQuantity) {
+        const certificateQuantity = addableAvailableQuantity - walletAvailableQuantity;
+        this.logger.info(`Minting ${certificateQuantity} ${resource.name} local-market certificates before resizing sell order.`);
+        await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
+      }
+
+      await this.cancelOrder(activeOrder, sellResource, 'sell', cancelledIds);
+      await this.placeOrder(sellResource, 'sell', targetPrice, nextQuantity, cancelledIds, quoteMint, sellDepositTokenAccount);
+      const postPlacementBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
+        refresh: true,
+        tokenProgramId: localMarketContext ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
+      });
+      await this.setLastWalletBalance(sellResource, 'sell', postPlacementBalance);
       this.logger.info(`Stored sell wallet baseline for ${resource.name}: ${postPlacementBalance}`);
       return;
     }
