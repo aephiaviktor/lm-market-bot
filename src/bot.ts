@@ -24,6 +24,7 @@ const ORDER_PRICE_EPSILON = 0.0000005;
 const ORDER_PRICE_STEP = 0.000001;
 const ORDER_PRICE_NUDGE = 0.00000001;
 const MARKET_LEADER_CACHE_TTL_MS = 300000;
+const OPEN_ORDERS_CACHE_TTL_MS = 30000;
 const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 60000;
 const STATUS_SNAPSHOT_CACHE_CEIL_MS = 300000;
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 1;
@@ -72,6 +73,10 @@ class RpcRequestRateLimiter {
 
     await next;
   }
+
+  penalize(waitMs: number) {
+    this.nextRequestAtMs = Math.max(this.nextRequestAtMs, Date.now() + waitMs);
+  }
 }
 
 function getErrorText(error: unknown): string {
@@ -114,6 +119,7 @@ async function callRpcWithRateLimitRetry<T>(
       logger.warn(
         `RPC rate limit for ${label}; retrying in ${retryDelayMs}ms (${attempt + 1}/${RPC_RATE_LIMIT_RETRY_DELAYS_MS.length}).`,
       );
+      limiter.penalize(retryDelayMs);
       await sleep(retryDelayMs);
     }
   }
@@ -214,6 +220,20 @@ type ResourceConfig = {
 type MarketOrderSnapshot = {
   allOrdersRaw: Order[];
   myOrdersRaw: Order[];
+};
+
+type MarketOrderSnapshotCacheEntry = {
+  expiresAt: number;
+  promise: Promise<MarketOrderSnapshot>;
+};
+
+type MyOpenOrdersCacheEntry = {
+  expiresAt: number;
+  promise: Promise<Order[]>;
+};
+
+type OpenOrderReadOptions = {
+  refresh?: boolean;
 };
 
 type OrderSnapshot = {
@@ -1063,6 +1083,8 @@ export class LmMarketBot {
   private lastCycleDurationMs: number | null = null;
   private readonly passiveOpenOrdersCache = new Map<string, BotOpenOrderStatus[]>();
   private readonly marketLeaderCache = new Map<string, { expiresAt: number; bestBuyPrice: number | null; bestSellPrice: number | null }>();
+  private readonly marketOrderSnapshotCache = new Map<string, MarketOrderSnapshotCacheEntry>();
+  private readonly myOpenOrdersCache = new Map<string, MyOpenOrdersCacheEntry>();
   private readonly walletBalanceCache = new Map<string, number>();
   private readonly starbasePlayerCache = new Map<string, PublicKey | null>();
   private readonly cargoPodCache = new Map<string, PublicKey[]>();
@@ -1073,6 +1095,7 @@ export class LmMarketBot {
   private nextTransactionSubmitAtMs = 0;
   private readonly failedAssetRetryTimers = new Map<string, NodeJS.Timeout>();
   private readonly failedAssetRetryAttempts = new Map<string, number>();
+  private nextFailedAssetRetryAtMs = 0;
 
   constructor(
     private readonly config: BotConfig,
@@ -1121,6 +1144,8 @@ export class LmMarketBot {
     this.checkIntervalMs = this.config.checkIntervalMinutes * 60 * 1000;
     this.passiveOpenOrdersCache.clear();
     this.marketLeaderCache.clear();
+    this.marketOrderSnapshotCache.clear();
+    this.myOpenOrdersCache.clear();
     this.walletBalanceCache.clear();
     this.starbasePlayerCache.clear();
     this.cargoPodCache.clear();
@@ -1131,6 +1156,8 @@ export class LmMarketBot {
 
   private invalidateMarketLeaderCacheForMint(mint: string) {
     this.marketLeaderCache.delete(mint);
+    this.marketOrderSnapshotCache.delete(mint);
+    this.myOpenOrdersCache.delete(mint);
     this.statusSnapshotCache = null;
   }
 
@@ -1178,6 +1205,7 @@ export class LmMarketBot {
     }
     this.failedAssetRetryTimers.clear();
     this.failedAssetRetryAttempts.clear();
+    this.nextFailedAssetRetryAtMs = 0;
   }
 
   async getStatusSnapshot(): Promise<BotStatusSnapshot> {
@@ -1229,12 +1257,7 @@ export class LmMarketBot {
     const cancelledIds = new Set<string>();
 
     try {
-      const myOrdersRaw = await this.gm.getOpenOrdersForPlayerAndAsset(
-        this.connection,
-        this.wallet.publicKey,
-        resource.mint,
-        GM_PROGRAM_ID,
-      );
+      const myOrdersRaw = await this.readMyOpenOrdersForResource(resource, { refresh: true });
       const myOrders = myOrdersRaw.filter((o) => o.orderType === getSideOrderType(normalizedSide));
       const activeOrder = sortOrdersForSide(normalizedSide, myOrders)[0];
 
@@ -1252,12 +1275,8 @@ export class LmMarketBot {
 
       const tx = await this.cancelOrder(activeOrder, resource, normalizedSide, cancelledIds);
 
-      const refreshedOrdersRaw = await this.gm.getOpenOrdersForPlayerAndAsset(
-        this.connection,
-        this.wallet.publicKey,
-        resource.mint,
-        GM_PROGRAM_ID,
-      );
+      this.invalidateMarketLeaderCacheForMint(resource.mint.toBase58());
+      const refreshedOrdersRaw = await this.readMyOpenOrdersForResource(resource, { refresh: true });
       const refreshedOrders = refreshedOrdersRaw.filter((o) => o.orderType === getSideOrderType(normalizedSide));
       await this.detectFills(resource, normalizedSide, refreshedOrders, cancelledIds);
 
@@ -1653,12 +1672,7 @@ export class LmMarketBot {
       currency: quoteSymbol,
     });
 
-    const refreshedOrdersRaw = await this.gm.getOpenOrdersForPlayerAndAsset(
-      this.connection,
-      this.wallet.publicKey,
-      resource.mint,
-      GM_PROGRAM_ID,
-    );
+    const refreshedOrdersRaw = await this.readMyOpenOrdersForResource(resource, { refresh: true });
 
     const refreshedOrders = refreshedOrdersRaw.filter(
       (o) => o.orderType === getSideOrderType(side) && isOrderForQuoteMint(o, quoteMint),
@@ -1828,13 +1842,56 @@ export class LmMarketBot {
     return maxBuyPrice;
   }
 
-  private async readMarketOrderSnapshot(resource: ResourceConfig): Promise<MarketOrderSnapshot> {
-    const [allOrdersRaw, myOrdersRaw] = await Promise.all([
-      this.gm.getOpenOrdersForAsset(this.connection, resource.mint, GM_PROGRAM_ID),
-      this.gm.getOpenOrdersForPlayerAndAsset(this.connection, this.wallet.publicKey, resource.mint, GM_PROGRAM_ID),
-    ]);
+  private async readMyOpenOrdersForResource(
+    resource: ResourceConfig,
+    options: OpenOrderReadOptions = {},
+  ): Promise<Order[]> {
+    const mintKey = resource.mint.toBase58();
+    const cached = this.myOpenOrdersCache.get(mintKey);
+    if (!options.refresh && cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
+    }
 
-    return { allOrdersRaw, myOrdersRaw };
+    const promise = this.gm
+      .getOpenOrdersForPlayerAndAsset(this.connection, this.wallet.publicKey, resource.mint, GM_PROGRAM_ID)
+      .catch((error) => {
+        this.myOpenOrdersCache.delete(mintKey);
+        throw error;
+      });
+
+    this.myOpenOrdersCache.set(mintKey, {
+      expiresAt: Date.now() + OPEN_ORDERS_CACHE_TTL_MS,
+      promise,
+    });
+
+    return promise;
+  }
+
+  private async readMarketOrderSnapshot(
+    resource: ResourceConfig,
+    options: OpenOrderReadOptions = {},
+  ): Promise<MarketOrderSnapshot> {
+    const mintKey = resource.mint.toBase58();
+    const cached = this.marketOrderSnapshotCache.get(mintKey);
+    if (!options.refresh && cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
+    }
+
+    const promise = (async () => {
+      const allOrdersRaw = await this.gm.getOpenOrdersForAsset(this.connection, resource.mint, GM_PROGRAM_ID);
+      const myOrdersRaw = await this.readMyOpenOrdersForResource(resource, options);
+      return { allOrdersRaw, myOrdersRaw };
+    })().catch((error) => {
+      this.marketOrderSnapshotCache.delete(mintKey);
+      throw error;
+    });
+
+    this.marketOrderSnapshotCache.set(mintKey, {
+      expiresAt: Date.now() + OPEN_ORDERS_CACHE_TTL_MS,
+      promise,
+    });
+
+    return promise;
   }
 
   private async processSellRule(
@@ -1861,14 +1918,15 @@ export class LmMarketBot {
 
     await this.detectFills(resource, 'sell', myOrders, cancelledIds);
 
-    const availableSellBalance = rule
-      ? await this.getStarbaseCargoPodBalance(rule, resource)
-      : await this.getWalletBalanceForMint(resource.mint, resource.name);
-    const availableSellSource = rule ? 'starbase-cargo-pod' : 'wallet';
+    const walletSellBalance = await this.getWalletBalanceForMint(resource.mint, resource.name, { refresh: true });
+    const cargoSellBalance = rule ? await this.getStarbaseCargoPodBalance(rule, resource) : null;
     const relevantSellQuantity = getRelevantOrderThreshold(minSellQuantity, this.config.relevantSellOrderPct);
     const targetPrice = this.getTargetSellPrice(allOrders, minPrice, relevantSellQuantity);
 
-    this.logger.info(`${resource.name} ${availableSellSource} sell availability: ${availableSellBalance}`);
+    this.logger.info(`${resource.name} wallet sell availability: ${walletSellBalance}`);
+    if (cargoSellBalance !== null) {
+      this.logger.info(`${resource.name} starbase cargo inventory: ${cargoSellBalance}`);
+    }
 
     const sortedMyOrders = [...myOrders].sort((a, b) => a.uiPrice - b.uiPrice);
     const activeOrder = sortedMyOrders[0];
@@ -1877,22 +1935,28 @@ export class LmMarketBot {
     }
 
     if (!activeOrder) {
-      if (availableSellBalance < minSellQuantity) {
-        this.logger.info(`Insufficient ${resource.name} to place a new sell order. Skipping.`);
+      if (walletSellBalance < minSellQuantity) {
+        const cargoMessage =
+          cargoSellBalance !== null && cargoSellBalance >= minSellQuantity
+            ? ` Starbase cargo has ${cargoSellBalance}, but GM sell orders require the hot wallet token account.`
+            : '';
+        this.logger.info(`Insufficient wallet ${resource.name} to place a new sell order.${cargoMessage} Skipping.`);
         await this.appendLog({
           event: 'SKIP_NO_INVENTORY',
           side: 'sell',
           asset: rule?.asset,
           resource: resource.name,
           mint: resource.mint.toBase58(),
-          balance: availableSellBalance,
+          balance: walletSellBalance,
+          cargoBalance: cargoSellBalance ?? undefined,
           minSellQuantity,
-          inventorySource: availableSellSource,
+          inventorySource: 'wallet',
+          message: cargoMessage.trim() || undefined,
         });
         return;
       }
 
-      const availableToSell = Math.floor(availableSellBalance);
+      const availableToSell = Math.floor(walletSellBalance);
       const quantityToSell = Math.min(availableToSell, limit ?? availableToSell);
       if (quantityToSell < minSellQuantity) {
         this.logger.info(
@@ -1908,7 +1972,7 @@ export class LmMarketBot {
     }
 
     const activeQuantity = getOrderRemainingQuantity(activeOrder);
-    const freeAvailableQuantity = Math.max(0, Math.floor(availableSellBalance));
+    const freeAvailableQuantity = Math.max(0, Math.floor(walletSellBalance));
     const remainingSellAllowance = Math.max(0, (limit ?? Number.POSITIVE_INFINITY) - activeQuantity);
     const addableAvailableQuantity = Math.min(freeAvailableQuantity, remainingSellAllowance);
     const canTopUpToSellLimit =
@@ -1934,8 +1998,8 @@ export class LmMarketBot {
       } else if (shouldResizeForAvailableInventory) {
         this.logger.info(
           canTopUpToSellLimit
-            ? `Sell ${availableSellSource} inventory for ${resource.name} is ${freeAvailableQuantity}. Topping up order from ${activeQuantity} to sell limit ${nextQuantity}.`
-            : `Sell ${availableSellSource} inventory for ${resource.name} is ${freeAvailableQuantity}. Resizing order from ${activeQuantity} to ${nextQuantity}.`,
+            ? `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Topping up order from ${activeQuantity} to sell limit ${nextQuantity}.`
+            : `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Resizing order from ${activeQuantity} to ${nextQuantity}.`,
         );
       } else {
         this.logger.info(
@@ -1951,7 +2015,7 @@ export class LmMarketBot {
     }
 
     this.logger.info(
-      `Sell order ${activeOrder.id} already at target price (${activeOrder.uiPrice}) and ${availableSellSource} inventory (${freeAvailableQuantity}) is below threshold or limit. Nothing to do.`,
+      `Sell order ${activeOrder.id} already at target price (${activeOrder.uiPrice}) and wallet inventory (${freeAvailableQuantity}) is below threshold or limit. Nothing to do.`,
     );
   }
 
@@ -2205,14 +2269,17 @@ export class LmMarketBot {
     }
 
     this.failedAssetRetryAttempts.set(key, nextAttempt);
+    const now = Date.now();
+    const retryDelayMs = Math.max(FAILED_ASSET_RETRY_DELAY_MS, this.nextFailedAssetRetryAtMs - now);
+    this.nextFailedAssetRetryAtMs = now + retryDelayMs + FAILED_ASSET_RETRY_DELAY_MS;
     this.logger.warn(
-      `Retrying failed asset ${group.asset} in ${FAILED_ASSET_RETRY_DELAY_MS}ms (${nextAttempt}/${FAILED_ASSET_RETRY_LIMIT}).`,
+      `Retrying failed asset ${group.asset} in ${retryDelayMs}ms (${nextAttempt}/${FAILED_ASSET_RETRY_LIMIT}).`,
     );
 
     const timer = setTimeout(() => {
       this.failedAssetRetryTimers.delete(key);
       void this.retryFailedAssetRuleGroup(group.asset);
-    }, FAILED_ASSET_RETRY_DELAY_MS);
+    }, retryDelayMs);
     this.failedAssetRetryTimers.set(key, timer);
   }
 
@@ -2304,63 +2371,56 @@ export class LmMarketBot {
     const now = new Date().toISOString();
     const trackedMints = new Set(this.trackedResources.map((resource) => resource.mint.toBase58()));
 
-    await Promise.all(
-      this.statusResources.map(async (resource) => {
-        const mintKey = resource.mint.toBase58();
-        const isTracked = trackedMints.has(mintKey);
+    for (const resource of this.statusResources) {
+      const mintKey = resource.mint.toBase58();
+      const isTracked = trackedMints.has(mintKey);
 
-        try {
-          let openOrders: BotOpenOrderStatus[] | null = null;
+      try {
+        let openOrders: BotOpenOrderStatus[] | null = null;
+
+        if (!isTracked) {
+          const cached = this.passiveOpenOrdersCache.get(mintKey);
+          if (cached) {
+            openOrders = cached.map((order) => ({ ...order }));
+          }
+        }
+
+        if (!openOrders) {
+          const myOrdersRaw = await this.readMyOpenOrdersForResource(resource);
+
+          openOrders = [];
+          for (const order of myOrdersRaw) {
+            const side = order.orderType === OrderSide.Buy ? 'buy' : order.orderType === OrderSide.Sell ? 'sell' : null;
+            if (!side) {
+              continue;
+            }
+
+            const quantity = getOrderTrackedQuantity(order);
+            const remaining = getOrderRemainingQuantity(order);
+            openOrders.push({
+              id: order.id,
+              asset: getResourceLabel(resource),
+              mint: mintKey,
+              side,
+              price: order.uiPrice,
+              quantity,
+              remaining,
+              partiallyFilled: quantity !== null ? remaining < quantity : false,
+              updatedAt: now,
+              currency: order.currencyMint === QUOTE_USDC_MINT.toBase58() ? 'USDC' : 'ATLAS',
+            });
+          }
 
           if (!isTracked) {
-            const cached = this.passiveOpenOrdersCache.get(mintKey);
-            if (cached) {
-              openOrders = cached.map((order) => ({ ...order }));
-            }
+            this.passiveOpenOrdersCache.set(mintKey, openOrders.map((order) => ({ ...order })));
           }
-
-          if (!openOrders) {
-            const myOrdersRaw = await this.gm.getOpenOrdersForPlayerAndAsset(
-              this.connection,
-              this.wallet.publicKey,
-              resource.mint,
-              GM_PROGRAM_ID,
-            );
-
-            openOrders = [];
-            for (const order of myOrdersRaw) {
-              const side = order.orderType === OrderSide.Buy ? 'buy' : order.orderType === OrderSide.Sell ? 'sell' : null;
-              if (!side) {
-                continue;
-              }
-
-              const quantity = getOrderTrackedQuantity(order);
-              const remaining = getOrderRemainingQuantity(order);
-              openOrders.push({
-                id: order.id,
-                asset: getResourceLabel(resource),
-                mint: mintKey,
-                side,
-                price: order.uiPrice,
-                quantity,
-                remaining,
-                partiallyFilled: quantity !== null ? remaining < quantity : false,
-                updatedAt: now,
-                currency: order.currencyMint === QUOTE_USDC_MINT.toBase58() ? 'USDC' : 'ATLAS',
-              });
-            }
-
-            if (!isTracked) {
-              this.passiveOpenOrdersCache.set(mintKey, openOrders.map((order) => ({ ...order })));
-            }
-          }
-
-          result.push(...openOrders);
-        } catch (err) {
-          this.logger.warn(`Failed to fetch open orders for ${resource.name}:`, err);
         }
-      }),
-    );
+
+        result.push(...openOrders);
+      } catch (err) {
+        this.logger.warn(`Failed to fetch open orders for ${resource.name}:`, err);
+      }
+    }
 
     const assetOrder = new Map<string, number>();
     for (let i = 0; i < this.config.assetRules.length; i++) {
