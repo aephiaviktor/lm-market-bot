@@ -26,7 +26,8 @@ const ORDER_PRICE_NUDGE = 0.00000001;
 const MARKET_LEADER_CACHE_TTL_MS = 300000;
 const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 60000;
 const STATUS_SNAPSHOT_CACHE_CEIL_MS = 300000;
-const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
+const DEFAULT_RPC_REQUESTS_PER_SECOND = 1;
+const MAX_RPC_REQUESTS_PER_SECOND = 1;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
 const DEFAULT_CHAIN_STATUS_REFRESH_INTERVAL_MINUTES = 5;
 const STARBASE_PLAYER_PROFILE_OFFSET = 9;
@@ -34,6 +35,8 @@ const STARBASE_PLAYER_STARBASE_OFFSET = 73;
 const CARGO_POD_AUTHORITY_OFFSET = 41;
 const CARGO_POD_TOKEN_CACHE_TTL_MS = 60000;
 const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [2000, 5000, 10000];
+const FAILED_ASSET_RETRY_DELAY_MS = 10000;
+const FAILED_ASSET_RETRY_LIMIT = 3;
 const SHIP_BUY_OUTBID_PCT = 0.005;
 const SHIP_PART_SUFFIX = ' (ship parts)';
 const SHIP_START_NAME = 'Busan Pulse';
@@ -432,7 +435,10 @@ export function buildBotConfig(input: BotInputConfig): BotConfig {
 
   const minSellQuantity = parsePositiveInteger(editable.MIN_SELL_QUANTITY, 'MIN_SELL_QUANTITY');
   const minPrice = parsePositiveNumber(editable.MIN_PRICE, 'MIN_PRICE');
-  const rpcRequestsPerSecond = parsePositiveNumber(editable.RPC_REQUESTS_PER_SECOND, 'RPC_REQUESTS_PER_SECOND');
+  const rpcRequestsPerSecond = Math.min(
+    parsePositiveNumber(editable.RPC_REQUESTS_PER_SECOND, 'RPC_REQUESTS_PER_SECOND'),
+    MAX_RPC_REQUESTS_PER_SECOND,
+  );
   const rpcTxSendRateLimitPerSecond = parsePositiveNumber(
     editable.RPC_TX_SEND_RATE_LIMIT_PER_SECOND,
     'RPC_TX_SEND_RATE_LIMIT_PER_SECOND',
@@ -1065,6 +1071,8 @@ export class LmMarketBot {
   private statusSnapshotCache: { expiresAt: number; snapshot: BotStatusSnapshot } | null = null;
   private transactionSubmissionQueue: Promise<void> = Promise.resolve();
   private nextTransactionSubmitAtMs = 0;
+  private readonly failedAssetRetryTimers = new Map<string, NodeJS.Timeout>();
+  private readonly failedAssetRetryAttempts = new Map<string, number>();
 
   constructor(
     private readonly config: BotConfig,
@@ -1165,6 +1173,11 @@ export class LmMarketBot {
       clearTimeout(this.loopTimer);
       this.loopTimer = null;
     }
+    for (const timer of this.failedAssetRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.failedAssetRetryTimers.clear();
+    this.failedAssetRetryAttempts.clear();
   }
 
   async getStatusSnapshot(): Promise<BotStatusSnapshot> {
@@ -2143,6 +2156,79 @@ export class LmMarketBot {
     }
   }
 
+  private clearFailedAssetRetry(asset: string) {
+    const key = asset.toLowerCase();
+    const timer = this.failedAssetRetryTimers.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      this.failedAssetRetryTimers.delete(key);
+    }
+    this.failedAssetRetryAttempts.delete(key);
+  }
+
+  private findCurrentAssetRuleGroup(asset: string): GroupedAssetRules | null {
+    const key = asset.toLowerCase();
+    const groupedRules = groupRulesByAsset(this.config.assetRules);
+    for (const group of groupedRules.values()) {
+      if (group.asset.toLowerCase() === key) {
+        return group;
+      }
+    }
+    return null;
+  }
+
+  private scheduleFailedAssetRetry(group: GroupedAssetRules) {
+    const key = group.asset.toLowerCase();
+    if (this.failedAssetRetryTimers.has(key)) {
+      return;
+    }
+
+    const nextAttempt = (this.failedAssetRetryAttempts.get(key) ?? 0) + 1;
+    if (nextAttempt > FAILED_ASSET_RETRY_LIMIT) {
+      this.logger.error(`Asset ${group.asset} failed after ${FAILED_ASSET_RETRY_LIMIT} short retries; waiting for next full cycle.`);
+      this.failedAssetRetryAttempts.delete(key);
+      return;
+    }
+
+    this.failedAssetRetryAttempts.set(key, nextAttempt);
+    this.logger.warn(
+      `Retrying failed asset ${group.asset} in ${FAILED_ASSET_RETRY_DELAY_MS}ms (${nextAttempt}/${FAILED_ASSET_RETRY_LIMIT}).`,
+    );
+
+    const timer = setTimeout(() => {
+      this.failedAssetRetryTimers.delete(key);
+      void this.retryFailedAssetRuleGroup(group.asset);
+    }, FAILED_ASSET_RETRY_DELAY_MS);
+    this.failedAssetRetryTimers.set(key, timer);
+  }
+
+  private async retryFailedAssetRuleGroup(asset: string) {
+    if (!this.running) {
+      return;
+    }
+
+    const group = this.findCurrentAssetRuleGroup(asset);
+    if (!group) {
+      this.clearFailedAssetRetry(asset);
+      return;
+    }
+
+    try {
+      await this.processAssetRuleGroup(group);
+      this.clearFailedAssetRetry(asset);
+      this.logger.info(`Retry succeeded for asset ${group.asset}.`);
+    } catch (err) {
+      this.logger.error(`Retry failed for asset ${group.asset}:`, err);
+      await this.appendLog({
+        event: 'ERROR',
+        asset: group.asset,
+        ruleIndexes: group.rules.map((item) => item.index),
+        message: (err as Error).message,
+      });
+      this.scheduleFailedAssetRetry(group);
+    }
+  }
+
   private async runCycle() {
     this.walletBalanceCache.clear();
     this.solBalanceCache = null;
@@ -2176,7 +2262,10 @@ export class LmMarketBot {
             ruleIndexes: group.rules.map((item) => item.index),
             message: (err as Error).message,
           });
+          this.scheduleFailedAssetRetry(group);
+          continue;
         }
+        this.clearFailedAssetRetry(group.asset);
       }
       return;
     }
