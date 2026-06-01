@@ -1844,6 +1844,7 @@ export class LmMarketBot {
     quoteMintOverride?: PublicKey,
     marketOrderSnapshot?: MarketOrderSnapshot,
     limit?: number | null,
+    rule?: AssetRuleConfig,
   ) {
     this.logger.info(`[${new Date().toISOString()}] Checking ${resource.name} sell market...`);
     const cancelledIds = new Set<string>();
@@ -1860,11 +1861,14 @@ export class LmMarketBot {
 
     await this.detectFills(resource, 'sell', myOrders, cancelledIds);
 
-    const walletBalance = await this.getWalletBalanceForMint(resource.mint, resource.name);
+    const availableSellBalance = rule
+      ? await this.getStarbaseCargoPodBalance(rule, resource)
+      : await this.getWalletBalanceForMint(resource.mint, resource.name);
+    const availableSellSource = rule ? 'starbase-cargo-pod' : 'wallet';
     const relevantSellQuantity = getRelevantOrderThreshold(minSellQuantity, this.config.relevantSellOrderPct);
     const targetPrice = this.getTargetSellPrice(allOrders, minPrice, relevantSellQuantity);
 
-    this.logger.info(`${resource.name} balance: ${walletBalance}`);
+    this.logger.info(`${resource.name} ${availableSellSource} sell availability: ${availableSellBalance}`);
 
     const sortedMyOrders = [...myOrders].sort((a, b) => a.uiPrice - b.uiPrice);
     const activeOrder = sortedMyOrders[0];
@@ -1873,20 +1877,22 @@ export class LmMarketBot {
     }
 
     if (!activeOrder) {
-      if (walletBalance < minSellQuantity) {
+      if (availableSellBalance < minSellQuantity) {
         this.logger.info(`Insufficient ${resource.name} to place a new sell order. Skipping.`);
         await this.appendLog({
           event: 'SKIP_NO_INVENTORY',
           side: 'sell',
+          asset: rule?.asset,
           resource: resource.name,
           mint: resource.mint.toBase58(),
-          balance: walletBalance,
+          balance: availableSellBalance,
           minSellQuantity,
+          inventorySource: availableSellSource,
         });
         return;
       }
 
-      const availableToSell = Math.floor(walletBalance);
+      const availableToSell = Math.floor(availableSellBalance);
       const quantityToSell = Math.min(availableToSell, limit ?? availableToSell);
       if (quantityToSell < minSellQuantity) {
         this.logger.info(
@@ -1902,34 +1908,34 @@ export class LmMarketBot {
     }
 
     const activeQuantity = getOrderRemainingQuantity(activeOrder);
-    const freeWalletQuantity = Math.max(0, Math.floor(walletBalance));
+    const freeAvailableQuantity = Math.max(0, Math.floor(availableSellBalance));
     const remainingSellAllowance = Math.max(0, (limit ?? Number.POSITIVE_INFINITY) - activeQuantity);
-    const addableWalletQuantity = Math.min(freeWalletQuantity, remainingSellAllowance);
+    const addableAvailableQuantity = Math.min(freeAvailableQuantity, remainingSellAllowance);
     const canTopUpToSellLimit =
       typeof limit === 'number' &&
       remainingSellAllowance > 0 &&
-      freeWalletQuantity >= remainingSellAllowance;
-    const shouldResizeForWallet = addableWalletQuantity >= minSellQuantity || canTopUpToSellLimit;
+      freeAvailableQuantity >= remainingSellAllowance;
+    const shouldResizeForAvailableInventory = addableAvailableQuantity >= minSellQuantity || canTopUpToSellLimit;
     const shouldResizeForLimit = typeof limit === 'number' && activeQuantity > limit;
     const priceDelta = Math.abs(activeOrder.uiPrice - targetPrice);
     const shouldReplaceForPrice = priceDelta >= ORDER_PRICE_EPSILON;
 
-    if (shouldResizeForWallet || shouldResizeForLimit || shouldReplaceForPrice) {
+    if (shouldResizeForAvailableInventory || shouldResizeForLimit || shouldReplaceForPrice) {
       const nextQuantity = shouldResizeForLimit
         ? limit ?? activeQuantity
-        : shouldResizeForWallet
-          ? activeQuantity + addableWalletQuantity
+        : shouldResizeForAvailableInventory
+          ? activeQuantity + addableAvailableQuantity
           : activeQuantity;
 
       if (shouldResizeForLimit) {
         this.logger.info(
           `Sell limit for ${resource.name} is ${limit}. Resizing order from ${activeQuantity} to ${nextQuantity}.`,
         );
-      } else if (shouldResizeForWallet) {
+      } else if (shouldResizeForAvailableInventory) {
         this.logger.info(
           canTopUpToSellLimit
-            ? `Sell free wallet balance for ${resource.name} is ${freeWalletQuantity}. Topping up order from ${activeQuantity} to sell limit ${nextQuantity}.`
-            : `Sell free wallet balance for ${resource.name} is ${freeWalletQuantity}. Resizing order from ${activeQuantity} to ${nextQuantity}.`,
+            ? `Sell ${availableSellSource} inventory for ${resource.name} is ${freeAvailableQuantity}. Topping up order from ${activeQuantity} to sell limit ${nextQuantity}.`
+            : `Sell ${availableSellSource} inventory for ${resource.name} is ${freeAvailableQuantity}. Resizing order from ${activeQuantity} to ${nextQuantity}.`,
         );
       } else {
         this.logger.info(
@@ -1945,7 +1951,7 @@ export class LmMarketBot {
     }
 
     this.logger.info(
-      `Sell order ${activeOrder.id} already at target price (${activeOrder.uiPrice}) and free wallet balance (${freeWalletQuantity}) is below threshold or limit. Nothing to do.`,
+      `Sell order ${activeOrder.id} already at target price (${activeOrder.uiPrice}) and ${availableSellSource} inventory (${freeAvailableQuantity}) is below threshold or limit. Nothing to do.`,
     );
   }
 
@@ -2136,7 +2142,15 @@ export class LmMarketBot {
       });
     } else if (sellRules.length === 1) {
       const sellRule = sellRules[0];
-      await this.processSellRule(resource, sellRule.rule.quantity, sellRule.rule.price, quoteMint, marketOrderSnapshot, sellRule.rule.limit);
+      await this.processSellRule(
+        resource,
+        sellRule.rule.quantity,
+        sellRule.rule.price,
+        quoteMint,
+        marketOrderSnapshot,
+        sellRule.rule.limit,
+        sellRule.rule,
+      );
     }
 
     if (buyRules.length > 1) {
