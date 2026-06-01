@@ -11,6 +11,7 @@ import {
   findAssetRegistryEntryForGroupAndName,
   type AssetRegistryGroup,
 } from './asset-registry';
+import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './starbase-registry';
 
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
 const QUOTE_ATLAS_MINT = new PublicKey('ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx');
@@ -521,7 +522,7 @@ function isRunnableAssetRuleInput(rule: AssetRuleInput | null | undefined): rule
 export function parseAssetRule(input: AssetRuleInput, index?: number): AssetRuleConfig {
   const label = typeof index === 'number' ? 'assetRules[' + index + ']' : 'assetRule';
 
-  const starbase = parseNonEmptyString(input.starbase, label + '.starbase');
+  const starbase = parseStarbaseName(input.starbase, label + '.starbase');
   const asset = parseNonEmptyString(input.asset, label + '.asset');
   const group = normalizeAssetRuleGroup(input.group, asset);
   const side = parseAssetRuleSide(input.side, label + '.side');
@@ -545,6 +546,15 @@ function parseAssetRuleSide(value: string | null | undefined, fieldName: string)
 
   if (normalized !== 'buy' && normalized !== 'sell') {
     throw new Error(`${fieldName} must be either "buy" or "sell"`);
+  }
+
+  return normalized;
+}
+
+function parseStarbaseName(value: string | null | undefined, fieldName: string): string {
+  const normalized = normalizeStarbaseRegistryName(parseNonEmptyString(value, fieldName));
+  if (!findStarbaseRegistryEntry(normalized)) {
+    throw new Error(`${fieldName} must be a known starbase`);
   }
 
   return normalized;
