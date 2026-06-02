@@ -18,6 +18,7 @@ import {
   StarbasePlayer,
   type SageIDLProgram,
 } from '@staratlas/sage';
+import { PLAYER_PROFILE_IDL, PlayerProfile, type PlayerProfileIDLProgram } from '@staratlas/player-profile';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
 import path from 'path';
@@ -31,6 +32,7 @@ import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './star
 
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
 const SAGE_PROGRAM_ID = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
+const PLAYER_PROFILE_PROGRAM_ID = new PublicKey('PprofUW1pURCnMW2si88GWPXEEK3Bvh9Tksy8WtnoYJ');
 const CARGO_PROGRAM_ID = new PublicKey('Cargo2VNTPPTi9c1vq1Jw5d3BWUNr18MjRtSupAghKEk');
 const PROFILE_FACTION_PROGRAM_ID = new PublicKey('pFACSRuobDmvfMKq1bAzwj27t6d2GJhSCHb1VcfnRmq');
 const SAGE_MARKET_HOOK_PROGRAM_ID = new PublicKey('hooKwBRKyzBqxVZFQVpLMKGexhmc6ZNaRAbwWi8uMok');
@@ -315,6 +317,7 @@ type LocalMarketSellContext = {
   gameId: PublicKey;
   gameState: PublicKey;
   profileFaction: PublicKey;
+  profileKeyIndex: number;
 };
 
 type IndexedAssetRule = {
@@ -1132,6 +1135,7 @@ export class LmMarketBot {
   private readonly sageProgram: SageIDLProgram & { account: any };
   private readonly cargoProgram: CargoIDLProgram;
   private readonly profileFactionProgram: ProfileFactionIDLProgram;
+  private readonly playerProfileProgram: PlayerProfileIDLProgram;
   private readonly analysisPath: string;
   private readonly logFilePath: string;
   private readonly stateFilePath: string;
@@ -1190,6 +1194,11 @@ export class LmMarketBot {
       PROFILE_FACTION_PROGRAM_ID,
       provider,
     ) as unknown as ProfileFactionIDLProgram;
+    this.playerProfileProgram = new Program(
+      getProgramIdlWithoutEvents(PLAYER_PROFILE_IDL),
+      PLAYER_PROFILE_PROGRAM_ID,
+      provider,
+    ) as unknown as PlayerProfileIDLProgram;
     this.resourceListResources = parseResources(config.resourceList);
     this.legacyResources = [];
     this.trackedResources = parseRuleResources(config.assetRules);
@@ -1468,6 +1477,30 @@ export class LmMarketBot {
     return null;
   }
 
+  private async resolveOwnerProfileKeyIndex(): Promise<number> {
+    const profile = new PublicKey(this.config.ownerProfile.trim());
+    const profileAccount = await this.connection.getAccountInfo(profile, 'confirmed');
+    if (!profileAccount || !profileAccount.owner.equals(PLAYER_PROFILE_PROGRAM_ID)) {
+      this.logger.warn('OWNER_PROFILE is not a valid Player Profile account; cannot mint local-market certificates.');
+      throw new Error('OWNER_PROFILE is not a valid Player Profile account');
+    }
+
+    const decodedProfile = PlayerProfile.decodeData(
+      { accountId: profile, accountInfo: profileAccount },
+      this.playerProfileProgram,
+    );
+    if (decodedProfile.type !== 'ok') {
+      throw new Error('Failed to decode OWNER_PROFILE account');
+    }
+    const matchingIndex = decodedProfile.data.profileKeys.findIndex((profileKey) => profileKey.key.equals(this.wallet.publicKey));
+    if (matchingIndex < 0) {
+      this.logger.warn('Hot wallet is not an authorized key on OWNER_PROFILE; cannot mint local-market certificates.');
+      throw new Error('Hot wallet is not an authorized key on OWNER_PROFILE');
+    }
+
+    return matchingIndex;
+  }
+
   private async getStarbaseCargoPods(starbaseName: string): Promise<PublicKey[]> {
     const starbasePlayer = await this.getStarbasePlayer(starbaseName);
     if (!starbasePlayer) {
@@ -1633,6 +1666,7 @@ export class LmMarketBot {
       gameId,
       gameState,
       profileFaction,
+      profileKeyIndex: await this.resolveOwnerProfileKeyIndex(),
     };
     this.localMarketSellContextCache.set(cacheKey, context);
     return context;
@@ -1700,7 +1734,7 @@ export class LmMarketBot {
       context.gameState,
       {
         amount: new BN(quantity),
-        keyIndex: 0,
+        keyIndex: context.profileKeyIndex,
       },
     )(keypairToAsyncSigner(this.wallet));
 
