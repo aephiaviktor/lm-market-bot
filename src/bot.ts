@@ -5,8 +5,8 @@ import { CargoType, CARGO_IDL, type CargoIDLProgram } from '@staratlas/cargo';
 import { keypairToAsyncSigner } from '@staratlas/data-source';
 import { GmClientService, Order, OrderSide } from '@staratlas/factory';
 import {
-  addExtraAccountMetasForExecute,
   createAssociatedTokenAccountIdempotentInstruction,
+  getExtraAccountMetaAddress,
   getTransferHook,
   getAssociatedTokenAddress,
   TOKEN_2022_PROGRAM_ID,
@@ -2048,8 +2048,6 @@ export class LmMarketBot {
     const sellInstruction = ixSet.instructions[ixSet.instructions.length - 1];
     await this.addToken2022TransferHookAccountsForSellOrder(
       depositMint,
-      quantity,
-      initializerDepositTokenAccount,
       sellInstruction,
     );
 
@@ -2063,8 +2061,6 @@ export class LmMarketBot {
 
   private async addToken2022TransferHookAccountsForSellOrder(
     depositMint: PublicKey,
-    quantity: number,
-    initializerDepositTokenAccount: PublicKey,
     instruction: Transaction['instructions'][number],
   ): Promise<void> {
     const mintAccount = await this.connection.getAccountInfo(depositMint, 'confirmed');
@@ -2078,21 +2074,19 @@ export class LmMarketBot {
       return;
     }
 
-    const { getOrderVault } = require('@staratlas/factory/dist/marketplace/pda_getters');
-    const [orderVaultAccount] = getOrderVault(this.wallet.publicKey, depositMint, GM_PROGRAM_ID);
     const keyCountBefore = instruction.keys.length;
+    const extraAccountMetaList = await getExtraAccountMetaAddress(depositMint, transferHook.programId);
 
-    await addExtraAccountMetasForExecute(
-      this.connection,
-      instruction,
+    for (const pubkey of [
+      extraAccountMetaList,
       transferHook.programId,
-      initializerDepositTokenAccount,
-      depositMint,
-      orderVaultAccount,
-      this.wallet.publicKey,
-      BigInt(quantity),
-      'confirmed',
-    );
+      TOKEN_2022_PROGRAM_ID,
+      new PublicKey('Sysvar1nstructions1111111111111111111111111'),
+    ]) {
+      if (!instruction.keys.some((key) => key.pubkey.equals(pubkey))) {
+        instruction.keys.push({ pubkey, isSigner: false, isWritable: false });
+      }
+    }
 
     const addedKeyCount = instruction.keys.length - keyCountBefore;
     if (addedKeyCount > 0) {
