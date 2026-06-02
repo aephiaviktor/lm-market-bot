@@ -1058,6 +1058,7 @@ function getOrderRemainingQuantity(order: Order): number {
 
 function getOrderTrackedQuantity(order: Order): number {
   const candidateValues = [
+    (order as any).orderOriginationQty,
     (order as any).orderQty,
     (order as any).uiOrderQty,
     (order as any).quantity,
@@ -2003,7 +2004,10 @@ export class LmMarketBot {
 
   private async signAndSend(transaction: Transaction, extraSigners: Keypair[] = []): Promise<string> {
     const { signature, blockhash, lastValidBlockHeight } = await this.submitTransactionRateLimited(transaction, extraSigners);
-    await this.connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+    const confirmation = await this.connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+    if (confirmation.value.err) {
+      throw new Error(`Transaction ${signature} failed during confirmation: ${JSON.stringify(confirmation.value.err)}`);
+    }
     return signature;
   }
 
@@ -2419,11 +2423,14 @@ export class LmMarketBot {
       this.logger.info(`${resource.name} starbase cargo inventory: ${cargoSellBalance}`);
     }
 
-    const sortedMyOrders = [...myOrders].sort((a, b) => a.uiPrice - b.uiPrice);
+    const sortedMyOrders = [...myOrders].sort((a, b) => {
+      const priceCompare = a.uiPrice - b.uiPrice;
+      if (Math.abs(priceCompare) >= ORDER_PRICE_EPSILON) {
+        return priceCompare;
+      }
+      return a.id.localeCompare(b.id);
+    });
     const activeOrder = sortedMyOrders[0];
-    for (let i = 1; i < sortedMyOrders.length; i++) {
-      await this.cancelOrder(sortedMyOrders[i], sellResource, 'sell', cancelledIds);
-    }
 
     if (!activeOrder) {
       const availableToSell = Math.min(
@@ -2469,7 +2476,7 @@ export class LmMarketBot {
       return;
     }
 
-    const activeQuantity = getOrderRemainingQuantity(activeOrder);
+    const activeQuantity = sortedMyOrders.reduce((sum, order) => sum + getOrderRemainingQuantity(order), 0);
     const walletAvailableQuantity = Math.max(0, Math.floor(walletSellBalance));
     const freeAvailableQuantity = Math.max(
       0,
@@ -2483,10 +2490,10 @@ export class LmMarketBot {
       freeAvailableQuantity >= remainingSellAllowance;
     const shouldResizeForAvailableInventory = addableAvailableQuantity >= minSellQuantity || canTopUpToSellLimit;
     const shouldResizeForLimit = typeof limit === 'number' && activeQuantity > limit;
-    const priceDelta = Math.abs(activeOrder.uiPrice - targetPrice);
-    const shouldReplaceForPrice = priceDelta >= ORDER_PRICE_EPSILON;
+    const shouldReplaceForPrice = sortedMyOrders.some((order) => Math.abs(order.uiPrice - targetPrice) >= ORDER_PRICE_EPSILON);
+    const shouldConsolidateOrders = sortedMyOrders.length > 1;
 
-    if (shouldResizeForAvailableInventory || shouldResizeForLimit || shouldReplaceForPrice) {
+    if (shouldResizeForAvailableInventory || shouldResizeForLimit || shouldReplaceForPrice || shouldConsolidateOrders) {
       const nextQuantity = shouldResizeForLimit
         ? limit ?? activeQuantity
         : shouldResizeForAvailableInventory
@@ -2503,9 +2510,13 @@ export class LmMarketBot {
             ? `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Topping up order from ${activeQuantity} to sell limit ${nextQuantity}.`
             : `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Resizing order from ${activeQuantity} to ${nextQuantity}.`,
         );
+      } else if (shouldReplaceForPrice) {
+        this.logger.info(
+          `Sell price moved for ${resource.name}. Replacing ${sortedMyOrders.length} order(s) at ${targetPrice} while keeping total quantity ${activeQuantity}.`,
+        );
       } else {
         this.logger.info(
-          `Sell price moved for ${resource.name}. Replacing order at ${targetPrice} while keeping quantity ${activeQuantity}.`,
+          `Consolidating ${sortedMyOrders.length} ${resource.name} sell orders into one order with total quantity ${activeQuantity}.`,
         );
       }
 
@@ -2515,7 +2526,9 @@ export class LmMarketBot {
         await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
       }
 
-      await this.cancelOrder(activeOrder, sellResource, 'sell', cancelledIds);
+      for (const order of sortedMyOrders) {
+        await this.cancelOrder(order, sellResource, 'sell', cancelledIds);
+      }
       await this.placeOrder(sellResource, 'sell', targetPrice, nextQuantity, cancelledIds, quoteMint, sellDepositTokenAccount);
       const postPlacementBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
         refresh: true,
@@ -2527,7 +2540,7 @@ export class LmMarketBot {
     }
 
     this.logger.info(
-      `Sell order ${activeOrder.id} already at target price (${activeOrder.uiPrice}) and wallet inventory (${freeAvailableQuantity}) is below threshold or limit. Nothing to do.`,
+      `Sell order ${activeOrder.id} already at target price (${activeOrder.uiPrice}) and total active quantity (${activeQuantity}) plus wallet inventory (${freeAvailableQuantity}) is below threshold or limit. Nothing to do.`,
     );
   }
 
