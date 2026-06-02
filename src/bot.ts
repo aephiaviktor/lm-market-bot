@@ -283,6 +283,14 @@ type OpenOrderReadOptions = {
   refresh?: boolean;
 };
 
+type OpenOrderStatusTarget = {
+  resource: ResourceConfig;
+  displayResource: ResourceConfig;
+  sideFilter?: AssetRuleSide;
+  ruleIndex?: number;
+  passiveCache: boolean;
+};
+
 type OrderSnapshot = {
   price: number;
   remaining: number;
@@ -2865,17 +2873,17 @@ export class LmMarketBot {
   private async buildOpenOrdersSnapshot(): Promise<BotOpenOrderStatus[]> {
     const result: BotOpenOrderStatus[] = [];
     const now = new Date().toISOString();
-    const trackedMints = new Set(this.trackedResources.map((resource) => resource.mint.toBase58()));
+    const targets = await this.buildOpenOrderStatusTargets();
 
-    for (const resource of this.statusResources) {
+    for (const target of targets) {
+      const resource = target.resource;
       const mintKey = resource.mint.toBase58();
-      const isTracked = trackedMints.has(mintKey);
 
       try {
         let openOrders: BotOpenOrderStatus[] | null = null;
 
-        if (!isTracked) {
-          const cached = this.passiveOpenOrdersCache.get(mintKey);
+        if (target.passiveCache) {
+          const cached = this.passiveOpenOrdersCache.get(this.getOpenOrderTargetCacheKey(target));
           if (cached) {
             openOrders = cached.map((order) => ({ ...order }));
           }
@@ -2890,12 +2898,15 @@ export class LmMarketBot {
             if (!side) {
               continue;
             }
+            if (target.sideFilter && side !== target.sideFilter) {
+              continue;
+            }
 
             const quantity = getOrderTrackedQuantity(order);
             const remaining = getOrderRemainingQuantity(order);
             openOrders.push({
               id: order.id,
-              asset: getResourceLabel(resource),
+              asset: getResourceLabel(target.displayResource),
               mint: mintKey,
               side,
               price: order.uiPrice,
@@ -2907,8 +2918,8 @@ export class LmMarketBot {
             });
           }
 
-          if (!isTracked) {
-            this.passiveOpenOrdersCache.set(mintKey, openOrders.map((order) => ({ ...order })));
+          if (target.passiveCache) {
+            this.passiveOpenOrdersCache.set(this.getOpenOrderTargetCacheKey(target), openOrders.map((order) => ({ ...order })));
           }
         }
 
@@ -2943,7 +2954,50 @@ export class LmMarketBot {
     return await this.annotateMarketLeaders(sorted);
   }
 
-  private getRelevantBadgeThresholds(): Map<string, { buy: number; sell: number }> {
+  private getOpenOrderTargetCacheKey(target: OpenOrderStatusTarget): string {
+    return `${target.resource.mint.toBase58()}:${target.sideFilter ?? 'all'}:${target.ruleIndex ?? 'resource'}`;
+  }
+
+  private async buildOpenOrderStatusTargets(): Promise<OpenOrderStatusTarget[]> {
+    if (this.config.assetRules.length === 0) {
+      return this.statusResources.map((resource) => ({
+        resource,
+        displayResource: resource,
+        passiveCache: false,
+      }));
+    }
+
+    const targets: OpenOrderStatusTarget[] = [];
+    const seen = new Set<string>();
+
+    for (let index = 0; index < this.config.assetRules.length; index++) {
+      const rule = this.config.assetRules[index];
+      const rawResource = resolveResourceForRule(rule);
+      let queryResource = rawResource;
+
+      if (rule.side === 'sell') {
+        const context = await this.resolveLocalMarketSellContext(rule, rawResource);
+        queryResource = context?.certificateResource ?? rawResource;
+      }
+
+      const key = `${queryResource.mint.toBase58()}:${rule.side}:${index}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      targets.push({
+        resource: queryResource,
+        displayResource: rawResource,
+        sideFilter: rule.side,
+        ruleIndex: index,
+        passiveCache: false,
+      });
+    }
+
+    return targets;
+  }
+
+  private async getRelevantBadgeThresholds(): Promise<Map<string, { buy: number; sell: number }>> {
     const thresholds = new Map<string, { buy: number; sell: number }>();
 
     if (this.config.assetRules.length > 0) {
@@ -2951,20 +3005,23 @@ export class LmMarketBot {
       for (const group of groupedRules.values()) {
         try {
           const resource = resolveResourceForRule(group.rules[0].rule);
-          const mintKey = resource.mint.toBase58();
-          const current = thresholds.get(mintKey) ?? { buy: 1, sell: 1 };
 
           const buyRule = group.rules.find((item) => item.rule.side === 'buy')?.rule;
           if (buyRule) {
+            const mintKey = resource.mint.toBase58();
+            const current = thresholds.get(mintKey) ?? { buy: 1, sell: 1 };
             current.buy = getRelevantOrderThreshold(buyRule.quantity, this.config.relevantBuyOrderPct);
+            thresholds.set(mintKey, current);
           }
 
           const sellRule = group.rules.find((item) => item.rule.side === 'sell')?.rule;
           if (sellRule) {
+            const sellContext = await this.resolveLocalMarketSellContext(sellRule, resource);
+            const mintKey = (sellContext?.certificateResource ?? resource).mint.toBase58();
+            const current = thresholds.get(mintKey) ?? { buy: 1, sell: 1 };
             current.sell = getRelevantOrderThreshold(sellRule.quantity, this.config.relevantSellOrderPct);
+            thresholds.set(mintKey, current);
           }
-
-          thresholds.set(mintKey, current);
         } catch {
           continue;
         }
@@ -2988,7 +3045,7 @@ export class LmMarketBot {
       return orders;
     }
 
-    const thresholds = this.getRelevantBadgeThresholds();
+    const thresholds = await this.getRelevantBadgeThresholds();
     const byMarket = new Map<string, BotOpenOrderStatus[]>();
     for (const order of orders) {
       const quoteMint = order.currency === 'USDC' ? QUOTE_USDC_MINT : QUOTE_ATLAS_MINT;
