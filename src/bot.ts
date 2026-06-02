@@ -32,7 +32,7 @@ import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './star
 
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
 const SAGE_PROGRAM_ID = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
-const PLAYER_PROFILE_PROGRAM_ID = new PublicKey('PprofUW1pURCnMW2si88GWPXEEK3Bvh9Tksy8WtnoYJ');
+const PLAYER_PROFILE_PROGRAM_ID = new PublicKey('pprofELXjL5Kck7Jn5hCpwAL82DpTkSYBENzahVtbc9');
 const CARGO_PROGRAM_ID = new PublicKey('Cargo2VNTPPTi9c1vq1Jw5d3BWUNr18MjRtSupAghKEk');
 const PROFILE_FACTION_PROGRAM_ID = new PublicKey('pFACSRuobDmvfMKq1bAzwj27t6d2GJhSCHb1VcfnRmq');
 const SAGE_MARKET_HOOK_PROGRAM_ID = new PublicKey('hooKwBRKyzBqxVZFQVpLMKGexhmc6ZNaRAbwWi8uMok');
@@ -1492,7 +1492,9 @@ export class LmMarketBot {
     if (decodedProfile.type !== 'ok') {
       throw new Error('Failed to decode OWNER_PROFILE account');
     }
-    const matchingIndex = decodedProfile.data.profileKeys.findIndex((profileKey) => profileKey.key.equals(this.wallet.publicKey));
+    const matchingIndex = decodedProfile.data.profileKeys.findIndex(
+      (profileKey) => profileKey.key.equals(this.wallet.publicKey) && profileKey.scope.equals(SAGE_PROGRAM_ID),
+    );
     if (matchingIndex < 0) {
       this.logger.warn('Hot wallet is not an authorized key on OWNER_PROFILE; cannot mint local-market certificates.');
       throw new Error('Hot wallet is not an authorized key on OWNER_PROFILE');
