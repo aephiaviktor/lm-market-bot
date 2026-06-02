@@ -15,7 +15,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.1.10';
+const APP_VERSION = '0.1.19';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
   'FACTION',
@@ -70,6 +70,8 @@ const openOrdersCountEl = document.getElementById('open-orders-count');
 const openOrdersListEl = document.getElementById('open-orders-list');
 const inventoryCountEl = document.getElementById('inventory-count');
 const inventoryListEl = document.getElementById('inventory-list');
+const certificatesCountEl = document.getElementById('certificates-count');
+const certificatesListEl = document.getElementById('certificates-list');
 const recentActivityCountEl = document.getElementById('recent-activity-count');
 const recentActivityListEl = document.getElementById('recent-activity-list');
 
@@ -814,6 +816,72 @@ function renderInventory(items) {
   }
 }
 
+function renderCertificates(items) {
+  certificatesListEl.innerHTML = '';
+  const visibleItems = (Array.isArray(items) ? items : []).filter(
+    (item) => typeof item?.balance === 'number' && Number.isFinite(item.balance) && item.balance > 0,
+  );
+  setListCount(certificatesCountEl, visibleItems.length);
+
+  if (!visibleItems.length) {
+    certificatesListEl.innerHTML = '<div class="empty-state">No wallet certificates</div>';
+    return;
+  }
+
+  const sortedItems = [...visibleItems].sort((a, b) => {
+    const starbaseComparison = compareStarbaseLabels(a?.starbase, b?.starbase);
+    if (starbaseComparison !== 0) {
+      return starbaseComparison;
+    }
+    return String(a?.asset || '').localeCompare(String(b?.asset || ''), undefined, { numeric: true });
+  });
+
+  sortedItems.forEach((itemData, index) => {
+    const item = document.createElement('div');
+    item.className = 'status-item certificate-item';
+
+    item.innerHTML = `
+      <div class="status-item-top">
+        <div class="inventory-left">
+          <span class="inventory-starbase">${itemData.starbase || '—'}</span>
+          <span class="inventory-asset">${itemData.asset || itemData.rawMint || 'Unknown Asset'} Certificate</span>
+        </div>
+        <div class="inventory-right">
+          <span class="inventory-metric">
+            <span class="inventory-metric-label">Balance</span>
+            <span>${formatNumber(itemData.balance, 0)}</span>
+          </span>
+          <button type="button" class="redeem-certificate-btn" data-index="${index}">Redeem</button>
+        </div>
+      </div>
+      <div class="status-item-row">
+        <span class="status-item-subtle">Mint</span>
+        <span class="status-item-value" title="${itemData.certificateMint || ''}">${shortenWallet(itemData.certificateMint || '—')}</span>
+      </div>
+    `;
+
+    const button = item.querySelector('.redeem-certificate-btn');
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      const asset = String(itemData.ruleAsset || itemData.asset || '').trim();
+      const starbase = String(itemData.starbase || '').trim();
+      appendLog(`[${new Date().toISOString()}] [INFO] Redeeming ${asset} certificate balance at ${starbase}...`);
+      try {
+        const result = await window.botApi.redeemCertificate({ asset, starbase });
+        const status = result?.status ?? 'unknown';
+        appendLog(`[${new Date().toISOString()}] [INFO] Redeem certificate ${status} for ${asset} at ${starbase}`);
+        await refreshBotStatus();
+      } catch (err) {
+        appendLog(`[${new Date().toISOString()}] [ERROR] Redeem certificate failed: ${err?.message || String(err)}`);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    certificatesListEl.appendChild(item);
+  });
+}
+
 function getActivityTitle(entry) {
   if (entry.event === 'START') {
     return 'Bot Start';
@@ -1017,6 +1085,7 @@ function renderStatusSnapshot(snapshot) {
 
   renderOpenOrders(Array.isArray(snapshot?.openOrders) ? snapshot.openOrders : []);
   renderInventory(Array.isArray(snapshot?.inventory) ? snapshot.inventory : []);
+  renderCertificates(Array.isArray(snapshot?.certificates) ? snapshot.certificates : []);
   renderRecentActivity(Array.isArray(snapshot?.recentActivity) ? snapshot.recentActivity : []);
 
   maybeCheckForUpdatesAfterCycle(snapshot);

@@ -404,6 +404,16 @@ export type BotInventoryStatus = {
   source: 'starbase-cargo-pod';
 };
 
+export type BotCertificateStatus = {
+  starbase: string;
+  asset: string;
+  ruleAsset: string;
+  rawMint: string;
+  certificateMint: string;
+  certificateTokenAccount: string;
+  balance: number;
+};
+
 export type BotRecentActivity = {
   timestamp: string;
   event: string;
@@ -444,6 +454,7 @@ export type BotStatusSnapshot = {
   activeRuleCount: number;
   openOrders: BotOpenOrderStatus[];
   inventory: BotInventoryStatus[];
+  certificates: BotCertificateStatus[];
   recentActivity: BotRecentActivity[];
   ruleHealth: BotRuleHealthStatus[];
 };
@@ -1315,6 +1326,7 @@ export class LmMarketBot {
     const usdcBalance = await this.getWalletBalanceForMint(QUOTE_USDC_MINT, 'USDC', { refresh: true });
 
     const inventory = await this.buildInventorySnapshot();
+    const certificates = await this.buildCertificateSnapshot();
 
     const openOrders = await this.buildOpenOrdersSnapshot();
     const recentActivity = await this.readRecentActivity(this.startedAt);
@@ -1334,6 +1346,7 @@ export class LmMarketBot {
       activeRuleCount: this.config.assetRules.length,
       openOrders,
       inventory,
+      certificates,
       recentActivity,
       ruleHealth,
     };
@@ -1421,6 +1434,50 @@ export class LmMarketBot {
         mint: resource.mint.toBase58(),
         balance: await this.getStarbaseCargoPodBalance(rule, resource),
         source: 'starbase-cargo-pod',
+      });
+    }
+
+    return rows.sort((a, b) => {
+      const starbaseCompare = compareStarbaseLabels(a.starbase, b.starbase);
+      if (starbaseCompare !== 0) {
+        return starbaseCompare;
+      }
+      return a.asset.localeCompare(b.asset, undefined, { numeric: true });
+    });
+  }
+
+  private async buildCertificateSnapshot(): Promise<BotCertificateStatus[]> {
+    const seen = new Set<string>();
+    const rows: BotCertificateStatus[] = [];
+
+    for (const rule of this.config.assetRules) {
+      if (rule.side !== 'sell') {
+        continue;
+      }
+
+      const rawResource = resolveResourceForRule(rule);
+      const context = await this.resolveLocalMarketSellContext(rule, rawResource);
+      if (!context) {
+        continue;
+      }
+
+      const certificateMint = context.certificateMint.toBase58();
+      if (seen.has(certificateMint)) {
+        continue;
+      }
+      seen.add(certificateMint);
+
+      rows.push({
+        starbase: rule.starbase,
+        asset: getResourceLabel(rawResource),
+        ruleAsset: rule.asset,
+        rawMint: rawResource.mint.toBase58(),
+        certificateMint,
+        certificateTokenAccount: context.certificateTokenAccount.toBase58(),
+        balance: await this.getWalletBalanceForMint(context.certificateMint, rawResource.name, {
+          refresh: true,
+          tokenProgramId: TOKEN_2022_PROGRAM_ID,
+        }),
       });
     }
 
@@ -1989,6 +2046,7 @@ export class LmMarketBot {
     });
 
     const sellInstruction = ixSet.instructions[ixSet.instructions.length - 1];
+    await this.useToken2022ProgramForToken2022SellOrder(depositMint, sellInstruction);
     await this.addToken2022TransferHookAccountsForSellOrder(
       depositMint,
       quantity,
@@ -2002,6 +2060,24 @@ export class LmMarketBot {
     }
 
     return { transaction, signers: ixSet.signers };
+  }
+
+  private async useToken2022ProgramForToken2022SellOrder(
+    depositMint: PublicKey,
+    instruction: Transaction['instructions'][number],
+  ): Promise<void> {
+    const mintAccount = await this.connection.getAccountInfo(depositMint, 'confirmed');
+    if (!mintAccount || !mintAccount.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+      return;
+    }
+
+    const tokenProgramAccount = instruction.keys.find((key) => key.pubkey.equals(TOKEN_PROGRAM_ID));
+    if (!tokenProgramAccount) {
+      return;
+    }
+
+    tokenProgramAccount.pubkey = TOKEN_2022_PROGRAM_ID;
+    this.logger.info(`Using Token-2022 program for ${depositMint.toBase58()} sell order.`);
   }
 
   private async addToken2022TransferHookAccountsForSellOrder(
@@ -2993,6 +3069,93 @@ export class LmMarketBot {
     );
 
     return orders;
+  }
+
+  async redeemCertificateForRule(
+    asset: string,
+    starbase?: string,
+  ): Promise<{ ok: boolean; status: string; asset: string; starbase?: string; quantity?: number; tx?: string; message?: string }> {
+    const normalizedAsset = String(asset || '').trim();
+    const normalizedStarbase = String(starbase || '').trim();
+    if (!normalizedAsset) {
+      return { ok: false, status: 'invalid_request', asset: normalizedAsset, starbase: normalizedStarbase };
+    }
+
+    const rule = this.config.assetRules.find((candidate) => {
+      if (candidate.side !== 'sell' || candidate.asset !== normalizedAsset) {
+        return false;
+      }
+      return !normalizedStarbase || candidate.starbase === normalizedStarbase;
+    });
+
+    if (!rule) {
+      return { ok: false, status: 'rule_not_found', asset: normalizedAsset, starbase: normalizedStarbase };
+    }
+
+    const rawResource = resolveResourceForRule(rule);
+    const context = await this.resolveLocalMarketSellContext(rule, rawResource);
+    if (!context) {
+      return { ok: false, status: 'local_market_context_unavailable', asset: normalizedAsset, starbase: rule.starbase };
+    }
+
+    const quantity = Math.floor(
+      await this.getWalletBalanceForMint(context.certificateMint, rawResource.name, {
+        refresh: true,
+        tokenProgramId: TOKEN_2022_PROGRAM_ID,
+      }),
+    );
+    if (quantity <= 0) {
+      return { ok: false, status: 'no_certificates', asset: normalizedAsset, starbase: rule.starbase, quantity: 0 };
+    }
+
+    this.logger.info(`Redeeming ${quantity} ${rawResource.name} local-market certificate(s) back to ${rule.starbase} cargo.`);
+    const transaction = new Transaction();
+    const redeemCertificate = await StarbasePlayer.redeemCertificate(
+      this.sageProgram,
+      this.cargoProgram,
+      context.starbasePlayer,
+      keypairToAsyncSigner(this.wallet),
+      new PublicKey(this.config.ownerProfile),
+      context.profileFaction,
+      'funder',
+      context.starbase,
+      context.cargoPod,
+      context.cargoType,
+      CARGO_STATS_DEFINITION,
+      context.certificateTokenAccount,
+      keypairToAsyncSigner(this.wallet),
+      context.certificateMint,
+      context.starbaseCargoTokenAccount,
+      context.cargoTokenAccount,
+      context.rawResource.mint,
+      context.gameId,
+      context.gameState,
+      {
+        amount: new BN(quantity),
+        keyIndex: context.profileKeyIndex,
+      },
+    )(keypairToAsyncSigner(this.wallet));
+
+    for (const item of Array.isArray(redeemCertificate) ? redeemCertificate : [redeemCertificate]) {
+      transaction.add(item.instruction);
+    }
+
+    const tx = await this.signAndSend(transaction);
+    this.walletBalanceCache.delete(`${context.certificateMint.toBase58()}:${TOKEN_2022_PROGRAM_ID.toBase58()}`);
+    this.cargoPodTokenBalanceCache.delete(context.cargoPod.toBase58());
+    this.invalidateStatusSnapshotCache();
+
+    await this.appendLog({
+      event: 'REDEEM_CERTIFICATES',
+      side: 'sell',
+      resource: context.rawResource.name,
+      mint: context.rawResource.mint.toBase58(),
+      certificateMint: context.certificateMint.toBase58(),
+      quantity,
+      tx,
+    });
+
+    return { ok: true, status: 'redeemed', asset: normalizedAsset, starbase: rule.starbase, quantity, tx };
   }
 
   private async readRecentActivity(sinceTimestamp?: string | null): Promise<BotRecentActivity[]> {

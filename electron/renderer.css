@@ -405,6 +405,7 @@ h3 {
 
 .order-item,
 .inventory-item,
+.certificate-item,
 .activity-item,
 .rule-item {
   padding: 3px 9px;
@@ -421,6 +422,7 @@ h3 {
 
 .order-item .status-item-top,
 .inventory-item .status-item-top,
+.certificate-item .status-item-top,
 .activity-item .status-item-top,
 .rule-item .status-item-top {
   align-items: center;
@@ -691,6 +693,7 @@ h3 {
 
 .remove-row-btn,
 .cancel-order-btn,
+.redeem-certificate-btn,
 #add-rule-row-btn {
   padding: 7px 10px;
   font-size: 12px;

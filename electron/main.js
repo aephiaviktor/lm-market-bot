@@ -439,6 +439,7 @@ function getEmptyStatusSnapshot() {
     activeRuleCount: 0,
     openOrders: [],
     inventory: [],
+    certificates: [],
     recentActivity: [],
     ruleHealth: [],
   };
@@ -641,6 +642,34 @@ ipcMain.handle('bot:rerun-assets', async (_event, assets) => {
 
   const newConfig = await applyRunningSettingsToBot();
   return rerunAssetGroups(newConfig, assets);
+});
+
+ipcMain.handle('bot:redeem-certificate', async (_event, payload) => {
+  const asset = String(payload?.asset ?? '').trim();
+  const starbase = String(payload?.starbase ?? '').trim();
+
+  if (!asset) {
+    logger.error('Redeem certificate failed: asset is required');
+    return { ok: false, status: 'invalid_request', asset, starbase };
+  }
+
+  if (!bot || !botRunning) {
+    logger.warn(`Redeem certificate requested for ${asset} at ${starbase || 'any starbase'} but bot is not running`);
+    return { ok: false, status: 'bot_not_running', asset, starbase };
+  }
+
+  try {
+    return await bot.redeemCertificateForRule(asset, starbase);
+  } catch (err) {
+    logger.error(`Redeem certificate failed for ${asset} at ${starbase || 'any starbase'}:`, err);
+    return {
+      ok: false,
+      status: 'error',
+      asset,
+      starbase,
+      message: err?.message || String(err),
+    };
+  }
 });
 
 ipcMain.handle('bot:status', async () => {
