@@ -2015,6 +2015,12 @@ export class LmMarketBot {
       this.wallet.publicKey,
       GM_PROGRAM_ID,
     );
+    const cancelInstruction = transaction.instructions[transaction.instructions.length - 1];
+    await this.addToken2022TransferHookAccountsForGmInstruction(
+      resource.mint,
+      cancelInstruction,
+      'cancel',
+    );
     const sig = await this.signAndSend(transaction, signers);
 
     this.invalidateMarketLeaderCacheForMint(resource.mint.toBase58());
@@ -2054,9 +2060,10 @@ export class LmMarketBot {
     });
 
     const sellInstruction = ixSet.instructions[ixSet.instructions.length - 1];
-    await this.addToken2022TransferHookAccountsForSellOrder(
+    await this.addToken2022TransferHookAccountsForGmInstruction(
       depositMint,
       sellInstruction,
+      'sell order',
     );
 
     const transaction = new Transaction();
@@ -2067,9 +2074,10 @@ export class LmMarketBot {
     return { transaction, signers: ixSet.signers };
   }
 
-  private async addToken2022TransferHookAccountsForSellOrder(
+  private async addToken2022TransferHookAccountsForGmInstruction(
     depositMint: PublicKey,
     instruction: Transaction['instructions'][number],
+    actionLabel: string,
   ): Promise<void> {
     const mintAccount = await this.connection.getAccountInfo(depositMint, 'confirmed');
     if (!mintAccount || !mintAccount.owner.equals(TOKEN_2022_PROGRAM_ID)) {
@@ -2099,7 +2107,7 @@ export class LmMarketBot {
     const addedKeyCount = instruction.keys.length - keyCountBefore;
     if (addedKeyCount > 0) {
       this.logger.info(
-        `Added ${addedKeyCount} Token-2022 transfer-hook account(s) for ${depositMint.toBase58()} sell order.`,
+        `Added ${addedKeyCount} Token-2022 transfer-hook account(s) for ${depositMint.toBase58()} ${actionLabel}.`,
       );
     }
   }
