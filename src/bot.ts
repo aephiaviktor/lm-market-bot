@@ -5,10 +5,13 @@ import { CargoType, CARGO_IDL, type CargoIDLProgram } from '@staratlas/cargo';
 import { keypairToAsyncSigner } from '@staratlas/data-source';
 import { GmClientService, Order, OrderSide } from '@staratlas/factory';
 import {
+  addExtraAccountMetasForExecute,
   createAssociatedTokenAccountIdempotentInstruction,
+  getTransferHook,
   getAssociatedTokenAddress,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
+  unpackMint,
 } from '@solana/spl-token';
 import { PROFILE_FACTION_IDL, ProfileFactionAccount, type ProfileFactionIDLProgram } from '@staratlas/profile-faction';
 import {
@@ -1985,12 +1988,61 @@ export class LmMarketBot {
       programId: GM_PROGRAM_ID,
     });
 
+    const sellInstruction = ixSet.instructions[ixSet.instructions.length - 1];
+    await this.addToken2022TransferHookAccountsForSellOrder(
+      depositMint,
+      quantity,
+      initializerDepositTokenAccount,
+      sellInstruction,
+    );
+
     const transaction = new Transaction();
     for (const instruction of ixSet.instructions) {
       transaction.add(instruction);
     }
 
     return { transaction, signers: ixSet.signers };
+  }
+
+  private async addToken2022TransferHookAccountsForSellOrder(
+    depositMint: PublicKey,
+    quantity: number,
+    initializerDepositTokenAccount: PublicKey,
+    instruction: Transaction['instructions'][number],
+  ): Promise<void> {
+    const mintAccount = await this.connection.getAccountInfo(depositMint, 'confirmed');
+    if (!mintAccount || !mintAccount.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+      return;
+    }
+
+    const mint = unpackMint(depositMint, mintAccount, TOKEN_2022_PROGRAM_ID);
+    const transferHook = getTransferHook(mint);
+    if (!transferHook) {
+      return;
+    }
+
+    const { getOrderVault } = require('@staratlas/factory/dist/marketplace/pda_getters');
+    const [orderVaultAccount] = getOrderVault(this.wallet.publicKey, depositMint, GM_PROGRAM_ID);
+    const keyCountBefore = instruction.keys.length;
+
+    await addExtraAccountMetasForExecute(
+      this.connection,
+      instruction,
+      transferHook.programId,
+      initializerDepositTokenAccount,
+      depositMint,
+      orderVaultAccount,
+      this.wallet.publicKey,
+      BigInt(quantity),
+      'confirmed',
+    );
+
+    const addedKeyCount = instruction.keys.length - keyCountBefore;
+    if (addedKeyCount > 0) {
+      this.logger.info(
+        `Added ${addedKeyCount} Token-2022 transfer-hook account(s) for ${depositMint.toBase58()} sell order.`,
+      );
+    }
   }
 
   private async placeOrder(
