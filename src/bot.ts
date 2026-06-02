@@ -2046,7 +2046,6 @@ export class LmMarketBot {
     });
 
     const sellInstruction = ixSet.instructions[ixSet.instructions.length - 1];
-    await this.useToken2022ProgramForToken2022SellOrder(depositMint, sellInstruction);
     await this.addToken2022TransferHookAccountsForSellOrder(
       depositMint,
       quantity,
@@ -2060,24 +2059,6 @@ export class LmMarketBot {
     }
 
     return { transaction, signers: ixSet.signers };
-  }
-
-  private async useToken2022ProgramForToken2022SellOrder(
-    depositMint: PublicKey,
-    instruction: Transaction['instructions'][number],
-  ): Promise<void> {
-    const mintAccount = await this.connection.getAccountInfo(depositMint, 'confirmed');
-    if (!mintAccount || !mintAccount.owner.equals(TOKEN_2022_PROGRAM_ID)) {
-      return;
-    }
-
-    const tokenProgramAccount = instruction.keys.find((key) => key.pubkey.equals(TOKEN_PROGRAM_ID));
-    if (!tokenProgramAccount) {
-      return;
-    }
-
-    tokenProgramAccount.pubkey = TOKEN_2022_PROGRAM_ID;
-    this.logger.info(`Using Token-2022 program for ${depositMint.toBase58()} sell order.`);
   }
 
   private async addToken2022TransferHookAccountsForSellOrder(
