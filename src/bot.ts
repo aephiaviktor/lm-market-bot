@@ -32,7 +32,7 @@ import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './star
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
 const SAGE_PROGRAM_ID = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
 const CARGO_PROGRAM_ID = new PublicKey('Cargo2VNTPPTi9c1vq1Jw5d3BWUNr18MjRtSupAghKEk');
-const PROFILE_FACTION_PROGRAM_ID = new PublicKey('pFACzkX2eSpAjDyEohD6i3VRJvREtH9ynbtM1DwVFsj');
+const PROFILE_FACTION_PROGRAM_ID = new PublicKey('pFACSRuobDmvfMKq1bAzwj27t6d2GJhSCHb1VcfnRmq');
 const SAGE_MARKET_HOOK_PROGRAM_ID = new PublicKey('hooKwBRKyzBqxVZFQVpLMKGexhmc6ZNaRAbwWi8uMok');
 const CARGO_STATS_DEFINITION = new PublicKey('CSTatsVpHbvZmwHbCjZKVfYQT5JXfsXccXufhEcwCqTg');
 const QUOTE_ATLAS_MINT = new PublicKey('ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx');
@@ -1606,6 +1606,15 @@ export class LmMarketBot {
       this.profileFactionProgram,
       new PublicKey(this.config.ownerProfile),
     )[0];
+    const profileFactionAccount = await this.connection.getAccountInfo(profileFaction, 'confirmed');
+    if (!profileFactionAccount || !profileFactionAccount.owner.equals(PROFILE_FACTION_PROGRAM_ID)) {
+      const owner = profileFactionAccount?.owner.toBase58() ?? 'missing';
+      this.logger.warn(
+        `OWNER_PROFILE faction account ${profileFaction.toBase58()} is ${owner}; expected ${PROFILE_FACTION_PROGRAM_ID.toBase58()}. Cannot mint local-market certificates.`,
+      );
+      this.localMarketSellContextCache.set(cacheKey, null);
+      return null;
+    }
 
     const context: LocalMarketSellContext = {
       rawResource,
