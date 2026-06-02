@@ -14,6 +14,7 @@ import { PROFILE_FACTION_IDL, ProfileFactionAccount, type ProfileFactionIDLProgr
 import {
   findCertificateMintAddress,
   SAGE_IDL,
+  SagePermissions,
   Starbase,
   StarbasePlayer,
   type SageIDLProgram,
@@ -1477,12 +1478,12 @@ export class LmMarketBot {
     return null;
   }
 
-  private async resolveOwnerProfileKeyIndex(): Promise<number> {
+  private async resolveOwnerProfileKeyIndex(): Promise<number | null> {
     const profile = new PublicKey(this.config.ownerProfile.trim());
     const profileAccount = await this.connection.getAccountInfo(profile, 'confirmed');
     if (!profileAccount || !profileAccount.owner.equals(PLAYER_PROFILE_PROGRAM_ID)) {
       this.logger.warn('OWNER_PROFILE is not a valid Player Profile account; cannot mint local-market certificates.');
-      throw new Error('OWNER_PROFILE is not a valid Player Profile account');
+      return null;
     }
 
     const decodedProfile = PlayerProfile.decodeData(
@@ -1490,14 +1491,24 @@ export class LmMarketBot {
       this.playerProfileProgram,
     );
     if (decodedProfile.type !== 'ok') {
-      throw new Error('Failed to decode OWNER_PROFILE account');
+      this.logger.warn('Failed to decode OWNER_PROFILE account; cannot mint local-market certificates.');
+      return null;
     }
     const matchingIndex = decodedProfile.data.profileKeys.findIndex(
       (profileKey) => profileKey.key.equals(this.wallet.publicKey) && profileKey.scope.equals(SAGE_PROGRAM_ID),
     );
     if (matchingIndex < 0) {
       this.logger.warn('Hot wallet is not an authorized key on OWNER_PROFILE; cannot mint local-market certificates.');
-      throw new Error('Hot wallet is not an authorized key on OWNER_PROFILE');
+      return null;
+    }
+
+    const profileKey = decodedProfile.data.profileKeys[matchingIndex];
+    const permissions = SagePermissions.fromPermissions(profileKey.permissions);
+    if (!permissions.addRemoveCargo) {
+      this.logger.warn(
+        'Hot wallet OWNER_PROFILE SAGE key is missing addRemoveCargo permission; cannot mint local-market certificates.',
+      );
+      return null;
     }
 
     return matchingIndex;
@@ -1650,6 +1661,11 @@ export class LmMarketBot {
       this.localMarketSellContextCache.set(cacheKey, null);
       return null;
     }
+    const profileKeyIndex = await this.resolveOwnerProfileKeyIndex();
+    if (profileKeyIndex === null) {
+      this.localMarketSellContextCache.set(cacheKey, null);
+      return null;
+    }
 
     const context: LocalMarketSellContext = {
       rawResource,
@@ -1668,7 +1684,7 @@ export class LmMarketBot {
       gameId,
       gameState,
       profileFaction,
-      profileKeyIndex: await this.resolveOwnerProfileKeyIndex(),
+      profileKeyIndex,
     };
     this.localMarketSellContextCache.set(cacheKey, context);
     return context;
