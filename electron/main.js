@@ -7,6 +7,99 @@ const { Keypair } = require('@solana/web3.js');
 const bs58 = require('bs58');
 const packageJson = require('../package.json');
 
+// ---------------------------------------------------------------------------
+// Profile isolation — one codebase can run multiple local profiles.
+// Launch with --profile <name>. The profile name is only a
+// local label and is not hardcoded as a faction.
+//
+// Before app.disableHardwareAcceleration() we:
+//   1. Read --profile from process.argv
+//   2. Set app.setPath('userData') to ~/.config/lm-market-bot/profiles/<name>
+//   3. Set app.setName() so taskbar/dock entries are distinct per profile
+// ---------------------------------------------------------------------------
+function getProfileName() {
+  const args = process.argv.slice(1);
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--profile' || arg === '--instance') {
+      return String(args[i + 1] ?? '').trim();
+    }
+    if (arg.startsWith('--profile=')) {
+      return arg.slice('--profile='.length).trim();
+    }
+    if (arg.startsWith('--instance=')) {
+      return arg.slice('--instance='.length).trim();
+    }
+  }
+  return '';
+}
+
+function sanitizeProfileName(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+const BASE_USER_DATA = path.join(process.env.HOME || process.env.USERPROFILE, '.config', 'lm-market-bot');
+const _profileName = sanitizeProfileName(getProfileName());
+const _instanceName = _profileName;
+console.error('[LmMarketBot] profile from argv =', JSON.stringify(_profileName));
+console.error('[LmMarketBot] HOME =', JSON.stringify(process.env.HOME));
+if (_profileName) {
+  app.setPath('userData', path.join(BASE_USER_DATA, 'profiles', _profileName));
+  app.setName(`LM Market Bot - ${_profileName}`);
+  if (typeof app.setDesktopName === 'function') {
+    app.setDesktopName(`lm-market-bot-${_profileName}.desktop`);
+  }
+}
+
+// TITLE_SUFFIX and APP_DISPLAY_NAME must be set synchronously so they are
+// available to createWindow() and the installApplicationMenu() About dialog.
+const TITLE_SUFFIX = _profileName ? ` - ${_profileName}` : '';
+const WINDOW_TITLE = `LM Market Bot${TITLE_SUFFIX}`;
+const APP_DISPLAY_NAME = WINDOW_TITLE;
+const APP_USER_MODEL_ID = _profileName
+  ? `com.aephia.lm-market-bot-${_profileName.toLowerCase()}`
+  : 'com.aephia.lm-market-bot';
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+
+function getProfileKey(profileName) {
+  const normalizedProfile = String(profileName || '').toUpperCase();
+  if (normalizedProfile.includes('MUD')) return 'mud';
+  if (normalizedProfile.includes('USTUR') || normalizedProfile.includes('UST')) return 'ustur';
+  if (normalizedProfile.includes('ONI')) return 'oni';
+  return '';
+}
+
+function getWindowIconPath() {
+  const profileKey = getProfileKey(_profileName);
+  if (profileKey) {
+    return path.join(
+      __dirname,
+      'assets',
+      process.platform === 'win32'
+        ? `lm-market-bot-${profileKey}.ico`
+        : `lm-market-bot-${profileKey}.png`,
+    );
+  }
+  return path.join(
+    __dirname,
+    'assets',
+    process.platform === 'win32' ? 'market_bot_icon.ico' : 'market_bot_icon.png',
+  );
+}
+
+function isDedicatedProfileInstall() {
+  if (!_profileName) return true;
+  const appRootName = path.basename(getAppRoot()).toLowerCase();
+  const profileSlug = _profileName.toLowerCase();
+  return appRootName === `lm-market-bot-${profileSlug}`;
+}
+
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-software-rasterizer');
@@ -24,16 +117,9 @@ const AEPHIA_API_KEY_VALIDATION_BYPASS = false; // Re-enable Aephia token valida
 const GITHUB_REPO = 'aephiaviktor/lm-market-bot';
 const GITHUB_MAIN_PACKAGE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/package.json`;
 const GITHUB_MAIN_ARCHIVE_URL = `https://github.com/${GITHUB_REPO}/archive/refs/heads/main.tar.gz`;
-const APP_DISPLAY_NAME = 'LM Market Bot';
-const APP_USER_MODEL_ID = 'com.aephia.lm-market-bot';
-
-if (process.platform === 'win32') {
-  app.setAppUserModelId(APP_USER_MODEL_ID);
-}
-
-function getWindowIconPath() {
-  return path.join(__dirname, 'assets', process.platform === 'win32' ? 'market_bot_icon.ico' : 'market_bot_icon.png');
-}
+console.error('[LmMarketBot] TITLE_SUFFIX =', JSON.stringify(TITLE_SUFFIX));
+console.error('[LmMarketBot] APP_USER_MODEL_ID =', JSON.stringify(APP_USER_MODEL_ID));
+console.error('[LmMarketBot] userData =', JSON.stringify(app.getPath('userData')));
 
 function installApplicationMenu() {
   const appVersion = packageJson.version || 'unknown';
@@ -205,6 +291,13 @@ async function downloadFile(url, targetPath) {
 }
 
 async function downloadUpdateAndRestart() {
+  if (!isDedicatedProfileInstall()) {
+    throw new Error(
+      `This ${APP_DISPLAY_NAME} instance is running from the shared app folder. ` +
+        `Launch it from a dedicated folder named lm-market-bot-${_profileName} before updating.`,
+    );
+  }
+
   const latest = await getLatestGithubVersion();
   const currentVersion = await readPackageVersion();
   if (compareVersions(latest.version, currentVersion) <= 0) {
@@ -552,6 +645,7 @@ function createWindow() {
     height: 900,
     minWidth: 1180,
     minHeight: 760,
+    title: WINDOW_TITLE,
     icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -563,6 +657,16 @@ function createWindow() {
   if (typeof mainWindow.setIcon === 'function') {
     mainWindow.setIcon(iconPath);
   }
+
+  // Keep the instance suffix even when renderer.html's <title> fires a
+  // page-title-updated event after load.
+  mainWindow.on('page-title-updated', (event) => {
+    event.preventDefault();
+    mainWindow.setTitle(WINDOW_TITLE);
+  });
+  mainWindow.webContents.once('did-finish-load', () => {
+    mainWindow.setTitle(WINDOW_TITLE);
+  });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer.html'));
 }
