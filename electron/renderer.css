@@ -582,8 +582,7 @@ h3 {
 .rules-table-scroll {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto;
   scrollbar-gutter: stable;
   border: 1px solid rgba(143, 193, 255, 0.12);
   border-radius: 10px;
@@ -595,9 +594,10 @@ h3 {
 }
 
 .rules-table {
+  min-width: 1040px;
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .rules-table th,
@@ -638,37 +638,64 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  min-width: 150px;
+  min-width: 0;
+}
+
+.rules-table th:nth-child(1),
+.rules-table td:nth-child(1) {
+  width: 58px;
+  text-align: center;
+}
+
+.rules-table th:nth-child(2),
+.rules-table td:nth-child(2) {
+  width: 126px;
 }
 
 .rules-table th:nth-child(3),
-.rules-table td:nth-child(3),
-.rules-table th:nth-child(4),
-.rules-table td:nth-child(4) {
-  width: 134px;
+.rules-table td:nth-child(3) {
+  min-width: 190px;
 }
 
+.rules-table th:nth-child(4),
+.rules-table td:nth-child(4),
 .rules-table th:nth-child(5),
 .rules-table td:nth-child(5) {
-  width: 142px;
+  width: 92px;
 }
 
-.rules-table td:nth-child(3) .cell-stack,
-.rules-table td:nth-child(4) .cell-stack {
-  min-width: 122px;
-}
-
-.rules-table td:nth-child(5) .cell-stack {
-  min-width: 130px;
-}
-
-.rules-table td:nth-child(3) input,
 .rules-table td:nth-child(4) input,
-.rules-table td:nth-child(5) input {
+.rules-table td:nth-child(5) input,
+.rules-table td:nth-child(6) input,
+.rules-table td:nth-child(7) input,
+.rules-table td:nth-child(8) input,
+.rules-table td:nth-child(9) input {
   width: 100%;
   min-width: 0;
   padding-left: 7px;
   padding-right: 7px;
+}
+
+.rules-table th:nth-child(6),
+.rules-table td:nth-child(6),
+.rules-table th:nth-child(7),
+.rules-table td:nth-child(7),
+.rules-table th:nth-child(8),
+.rules-table td:nth-child(8),
+.rules-table th:nth-child(9),
+.rules-table td:nth-child(9) {
+  width: 94px;
+}
+
+.refill-cell input {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+}
+
+.compact-cell,
+.price-cell {
+  min-width: 76px;
 }
 
 .cell-hint {
@@ -1005,62 +1032,4 @@ button:disabled {
   background: linear-gradient(135deg, #1d86c9, #4cc3ff);
   color: #04111f;
   border-color: transparent;
-}
-
-.rules-table.ships-rules-table {
-  table-layout: fixed;
-}
-
-.rules-table.ships-rules-table th:nth-child(1),
-.rules-table.ships-rules-table td:nth-child(1) {
-  width: 32%;
-}
-
-.rules-table.ships-rules-table th:nth-child(2),
-.rules-table.ships-rules-table td:nth-child(2) {
-  width: 82px;
-}
-
-.rules-table.ships-rules-table th:nth-child(3),
-.rules-table.ships-rules-table td:nth-child(3) {
-  width: 134px;
-}
-
-.rules-table.ships-rules-table th:nth-child(4),
-.rules-table.ships-rules-table td:nth-child(4) {
-  width: 134px;
-}
-
-.rules-table.ships-rules-table th:nth-child(5),
-.rules-table.ships-rules-table td:nth-child(5) {
-  width: 142px;
-}
-
-.rules-table.ships-rules-table th:nth-child(6),
-.rules-table.ships-rules-table td:nth-child(6) {
-  width: 142px;
-}
-
-.rules-table.ships-rules-table .cell-stack {
-  min-width: 0;
-}
-
-.rules-table.ships-rules-table select,
-.rules-table.ships-rules-table input {
-  width: 100%;
-  min-width: 0;
-  padding-left: 7px;
-  padding-right: 7px;
-}
-
-.rules-table.ships-rules-table .remove-cell .cell-stack {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 4px;
-}
-
-.rules-table.ships-rules-table .remove-row-btn,
-.rules-table.ships-rules-table .cancel-order-btn {
-  padding: 6px 8px;
-  font-size: 11px;
 }

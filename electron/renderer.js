@@ -15,7 +15,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.1.21';
+const APP_VERSION = '0.2.0';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
   'FACTION',
@@ -48,7 +48,6 @@ const updateCancelBtn = document.getElementById('update-cancel-btn');
 const addRuleRowBtn = document.getElementById('add-rule-row-btn');
 const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
 const assetRulesBody = document.getElementById('asset-rules-body');
-const assetRulePriceHeader = document.getElementById('asset-rule-price-header');
 const displayHotWalletAddress = document.getElementById('display-hot-wallet-address');
 const displayManagedWallet = document.getElementById('display-managed-wallet');
 const displayPlayerProfile = document.getElementById('display-player-profile');
@@ -356,14 +355,23 @@ function normalizeAssetRuleRows(rows) {
     const asset = String(row?.asset ?? '').trim();
     const starbase = normalizeStarbaseValue(row?.starbase);
     const normalizedStarbase = validStarbases.has(starbase) ? starbase : fallbackStarbase;
+    const isStrategyRow = ['minQuantity', 'maxQuantity', 'minBuyPrice', 'maxBuyPrice', 'minSellPrice', 'maxSellPrice']
+      .some((field) => Object.prototype.hasOwnProperty.call(row || {}, field));
+    const legacySide = row?.side === 'buy' ? 'buy' : 'sell';
+    const legacyQuantity = String(row?.quantity ?? '').trim();
+    const legacyLimit = String(row?.limit ?? '').trim();
+    const legacyPrice = String(row?.price ?? '').trim();
     const normalized = {
       starbase: normalizedStarbase,
       group,
       asset: validValues.has(asset) ? asset : '',
-      side: row?.side === 'buy' ? 'buy' : 'sell',
-      quantity: String(row?.quantity ?? '').trim(),
-      limit: String(row?.limit ?? '').trim(),
-      price: String(row?.price ?? '').trim(),
+      refill: row?.refill === false || row?.refill === 'false' ? false : true,
+      minQuantity: String(row?.minQuantity ?? (isStrategyRow ? '' : legacySide === 'sell' ? legacyQuantity : '1')).trim(),
+      maxQuantity: String(row?.maxQuantity ?? (isStrategyRow ? '' : legacyLimit || legacyQuantity)).trim(),
+      minBuyPrice: String(row?.minBuyPrice ?? (isStrategyRow ? '' : legacySide === 'buy' ? '' : '')).trim(),
+      maxBuyPrice: String(row?.maxBuyPrice ?? (isStrategyRow ? '' : legacySide === 'buy' ? legacyPrice : '')).trim(),
+      minSellPrice: String(row?.minSellPrice ?? (isStrategyRow ? '' : legacySide === 'sell' ? legacyPrice : '')).trim(),
+      maxSellPrice: String(row?.maxSellPrice ?? '').trim(),
     };
 
     if (validValues.has(asset)) {
@@ -374,26 +382,8 @@ function normalizeAssetRuleRows(rows) {
   });
 }
 
-function updateRuleHint(rowElement, side) {
-  const quantityHint = rowElement.querySelector('[data-role="quantity-hint"]');
-  const limitHint = rowElement.querySelector('[data-role="limit-hint"]');
-  const priceHint = rowElement.querySelector('[data-role="price-hint"]');
-  if (quantityHint) {
-    quantityHint.textContent = side === 'buy' ? 'Max buy quantity' : 'Min sell quantity';
-  }
-  if (limitHint) {
-    limitHint.textContent = side === 'buy' ? 'Max buy quantity' : 'Max sell quantity';
-  }
-  if (priceHint) {
-    priceHint.textContent = side === 'buy' ? 'Max price' : 'Min price';
-  }
-}
-
 function renderAssetRuleRows() {
   syncRowsWithResources();
-  if (assetRulePriceHeader) {
-    assetRulePriceHeader.textContent = 'Price (ATLAS)';
-  }
   const allOptions = getAllResourceOptions();
   const options = getResourceOptions(activeAssetRuleGroup);
   const starbaseOptions = getStarbaseOptionsForFaction();
@@ -410,38 +400,37 @@ function renderAssetRuleRows() {
       return assetA.localeCompare(assetB, undefined, { numeric: true });
     });
 
-  const rulesTable = assetRulesBody.closest('table');
-  if (rulesTable) {
-    rulesTable.classList.remove('ships-rules-table');
-  }
-
   assetRulesBody.innerHTML = '';
   addRuleRowBtn.disabled = options.length === 0 || starbaseOptions.length === 0;
+  const emptyColspan = 10;
 
   if (!allOptions.length) {
-    assetRulesBody.innerHTML = '<tr><td colspan="7" class="empty-state">Asset registry unavailable. Save a valid Aephia API Key in Settings to load the managed asset list.</td></tr>';
+    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">Asset registry unavailable. Save a valid Aephia API Key in Settings to load the managed asset list.</td></tr>`;
     return;
   }
 
   if (!options.length) {
-    assetRulesBody.innerHTML = '<tr><td colspan="7" class="empty-state">No assets available for this group.</td></tr>';
+    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">No assets available for this group.</td></tr>`;
     return;
   }
 
   if (!starbaseOptions.length) {
-    assetRulesBody.innerHTML = '<tr><td colspan="7" class="empty-state">No starbases configured for this faction.</td></tr>';
+    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">No starbases configured for this faction.</td></tr>`;
     return;
   }
 
   if (!visibleRows.length) {
     const groupLabel = activeAssetRuleGroup === 'components' ? 'component' : 'raw material';
-    assetRulesBody.innerHTML = `<tr><td colspan="7" class="empty-state">No ${groupLabel} rules yet. Use + Add Row.</td></tr>`;
+    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">No ${groupLabel} rules yet. Use + Add Row.</td></tr>`;
     return;
   }
 
   visibleRows.forEach(({ row, index }) => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
+      <td class="refill-cell">
+        <input data-index="${index}" data-field="refill" type="checkbox" />
+      </td>
       <td>
         <select data-index="${index}" data-field="starbase"></select>
       </td>
@@ -449,27 +438,39 @@ function renderAssetRuleRows() {
         <select data-index="${index}" data-field="asset"></select>
       </td>
       <td>
-        <select data-index="${index}" data-field="side">
-          <option value="buy">buy</option>
-          <option value="sell">sell</option>
-        </select>
-      </td>
-      <td>
-        <div class="cell-stack">
-          <input data-index="${index}" data-field="quantity" type="number" min="0" step="1" inputmode="numeric" />
-          <span class="cell-hint" data-role="quantity-hint"></span>
+        <div class="cell-stack compact-cell">
+          <input data-index="${index}" data-field="minQuantity" type="number" min="0" step="1" inputmode="numeric" />
+          <span class="cell-hint">Min order</span>
         </div>
       </td>
       <td>
-        <div class="cell-stack">
-          <input data-index="${index}" data-field="limit" type="number" min="0" step="1" inputmode="numeric" />
-          <span class="cell-hint" data-role="limit-hint"></span>
+        <div class="cell-stack compact-cell">
+          <input data-index="${index}" data-field="maxQuantity" type="number" min="0" step="1" inputmode="numeric" />
+          <span class="cell-hint">Max active</span>
         </div>
       </td>
       <td>
-        <div class="cell-stack">
-          <input data-index="${index}" data-field="price" type="number" min="0" step="0.000001" inputmode="decimal" />
-          <span class="cell-hint" data-role="price-hint"></span>
+        <div class="cell-stack price-cell">
+          <input data-index="${index}" data-field="minBuyPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
+          <span class="cell-hint">ATLAS</span>
+        </div>
+      </td>
+      <td>
+        <div class="cell-stack price-cell">
+          <input data-index="${index}" data-field="maxBuyPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
+          <span class="cell-hint">ATLAS</span>
+        </div>
+      </td>
+      <td>
+        <div class="cell-stack price-cell">
+          <input data-index="${index}" data-field="minSellPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
+          <span class="cell-hint">ATLAS</span>
+        </div>
+      </td>
+      <td>
+        <div class="cell-stack price-cell">
+          <input data-index="${index}" data-field="maxSellPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
+          <span class="cell-hint">ATLAS</span>
         </div>
       </td>
       <td class="remove-cell">
@@ -482,11 +483,15 @@ function renderAssetRuleRows() {
 
     const starbaseSelect = tr.querySelector('[data-field="starbase"]');
     const assetSelect = tr.querySelector('[data-field="asset"]');
-    const sideSelect = tr.querySelector('[data-field="side"]');
-    const quantityInput = tr.querySelector('[data-field="quantity"]');
-    const limitInput = tr.querySelector('[data-field="limit"]');
-    const priceInput = tr.querySelector('[data-field="price"]');
-    const cancelOrderBtn = tr.querySelector('.cancel-order-btn');
+    const refillInput = tr.querySelector('[data-field="refill"]');
+    const fieldsByName = {
+      minQuantity: tr.querySelector('[data-field="minQuantity"]'),
+      maxQuantity: tr.querySelector('[data-field="maxQuantity"]'),
+      minBuyPrice: tr.querySelector('[data-field="minBuyPrice"]'),
+      maxBuyPrice: tr.querySelector('[data-field="maxBuyPrice"]'),
+      minSellPrice: tr.querySelector('[data-field="minSellPrice"]'),
+      maxSellPrice: tr.querySelector('[data-field="maxSellPrice"]'),
+    };
 
     for (const starbase of starbaseOptions) {
       const opt = document.createElement('option');
@@ -509,11 +514,10 @@ function renderAssetRuleRows() {
 
     starbaseSelect.value = starbaseOptions.includes(row.starbase) ? row.starbase : starbaseOptions[0];
     assetSelect.value = options.some((option) => option.value === row.asset) ? row.asset : '';
-    sideSelect.value = row.side === 'buy' ? 'buy' : 'sell';
-    quantityInput.value = row.quantity ?? '';
-    limitInput.value = row.limit ?? '';
-    priceInput.value = row.price ?? '';
-    updateRuleHint(tr, sideSelect.value);
+    refillInput.checked = row.refill !== false;
+    for (const [field, input] of Object.entries(fieldsByName)) {
+      input.value = row[field] ?? '';
+    }
 
     starbaseSelect.addEventListener('change', (event) => {
       assetRuleRows[index].starbase = event.target.value;
@@ -525,28 +529,21 @@ function renderAssetRuleRows() {
       renderAssetRuleRows();
     });
 
-    sideSelect.addEventListener('change', (event) => {
-      assetRuleRows[index].side = event.target.value;
-      updateRuleHint(tr, event.target.value);
+    refillInput.addEventListener('change', (event) => {
+      assetRuleRows[index].refill = event.target.checked;
     });
 
-    quantityInput.addEventListener('input', (event) => {
-      assetRuleRows[index].quantity = event.target.value;
-    });
+    for (const [field, input] of Object.entries(fieldsByName)) {
+      input.addEventListener('input', (event) => {
+        assetRuleRows[index][field] = event.target.value;
+      });
+    }
 
-    limitInput.addEventListener('input', (event) => {
-      assetRuleRows[index].limit = event.target.value;
-    });
-
-    priceInput.addEventListener('input', (event) => {
-      assetRuleRows[index].price = event.target.value;
-    });
-
+    const cancelOrderBtn = tr.querySelector('.cancel-order-btn');
     cancelOrderBtn.addEventListener('click', async () => {
       const rowSnapshot = {
         asset: assetRuleRows[index]?.asset ?? '',
         starbase: assetRuleRows[index]?.starbase ?? '',
-        side: assetRuleRows[index]?.side === 'buy' ? 'buy' : 'sell',
       };
 
       if (!rowSnapshot.asset) {
@@ -554,11 +551,18 @@ function renderAssetRuleRows() {
         return;
       }
 
+      const activeSides = [];
+      if (String(assetRuleRows[index]?.maxBuyPrice ?? '').trim()) activeSides.push('buy');
+      if (String(assetRuleRows[index]?.minSellPrice ?? '').trim()) activeSides.push('sell');
+      const sidesToCancel = activeSides.length ? activeSides : ['buy', 'sell'];
+
       cancelOrderBtn.disabled = true;
       try {
-        const result = await window.botApi.cancelOrder(rowSnapshot);
-        const status = result?.status ?? 'unknown';
-        appendLog(`[${new Date().toISOString()}] [INFO] Cancel order ${status} for ${rowSnapshot.asset} [${rowSnapshot.side}]`);
+        for (const side of sidesToCancel) {
+          const result = await window.botApi.cancelOrder({ ...rowSnapshot, side });
+          const status = result?.status ?? 'unknown';
+          appendLog(`[${new Date().toISOString()}] [INFO] Cancel order ${status} for ${rowSnapshot.asset} [${side}]`);
+        }
         await refreshBotStatus();
       } catch (err) {
         appendLog(`[${new Date().toISOString()}] [ERROR] ${err?.message || String(err)}`);
@@ -1121,10 +1125,13 @@ function normalizeAssetRulesForDiff(rows) {
       starbase: normalizeStarbaseValue(row?.starbase),
       group: String(row?.group ?? '').trim(),
       asset: String(row?.asset ?? '').trim(),
-      side: row?.side === 'buy' ? 'buy' : 'sell',
-      quantity: String(row?.quantity ?? '').trim(),
-      limit: String(row?.limit ?? '').trim(),
-      price: String(row?.price ?? '').trim(),
+      refill: row?.refill === false || row?.refill === 'false' ? '0' : '1',
+      minQuantity: String(row?.minQuantity ?? '').trim(),
+      maxQuantity: String(row?.maxQuantity ?? '').trim(),
+      minBuyPrice: String(row?.minBuyPrice ?? '').trim(),
+      maxBuyPrice: String(row?.maxBuyPrice ?? '').trim(),
+      minSellPrice: String(row?.minSellPrice ?? '').trim(),
+      maxSellPrice: String(row?.maxSellPrice ?? '').trim(),
     }))
     .filter((row) => row.asset)
     .sort((a, b) => {
@@ -1132,16 +1139,22 @@ function normalizeAssetRulesForDiff(rows) {
       if (starbaseComparison !== 0) {
         return starbaseComparison;
       }
-      return `${a.group}|${a.asset}|${a.side}`.localeCompare(`${b.group}|${b.asset}|${b.side}`);
+      return `${a.group}|${a.asset}`.localeCompare(`${b.group}|${b.asset}`);
     });
 }
 
 function getChangedAssets(previousRows, nextRows) {
   const prevMap = new Map(
-    normalizeAssetRulesForDiff(previousRows).map((row) => [`${row.starbase}|${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
+    normalizeAssetRulesForDiff(previousRows).map((row) => [
+      `${row.starbase}|${row.group}|${row.asset}`,
+      `${row.refill}|${row.minQuantity}|${row.maxQuantity}|${row.minBuyPrice}|${row.maxBuyPrice}|${row.minSellPrice}|${row.maxSellPrice}`,
+    ])
   );
   const nextMap = new Map(
-    normalizeAssetRulesForDiff(nextRows).map((row) => [`${row.starbase}|${row.group}|${row.asset}|${row.side}`, `${row.quantity}|${row.limit}|${row.price}`])
+    normalizeAssetRulesForDiff(nextRows).map((row) => [
+      `${row.starbase}|${row.group}|${row.asset}`,
+      `${row.refill}|${row.minQuantity}|${row.maxQuantity}|${row.minBuyPrice}|${row.maxBuyPrice}|${row.minSellPrice}|${row.maxSellPrice}`,
+    ])
   );
 
   const touched = new Set();
@@ -1340,10 +1353,13 @@ addRuleRowBtn.addEventListener('click', () => {
     starbase: firstStarbase,
     group: activeAssetRuleGroup,
     asset: '',
-    side: 'sell',
-    quantity: '',
-    limit: '',
-    price: '',
+    refill: true,
+    minQuantity: '',
+    maxQuantity: '',
+    minBuyPrice: '',
+    maxBuyPrice: '',
+    minSellPrice: '',
+    maxSellPrice: '',
   });
   renderAssetRuleRows();
 });

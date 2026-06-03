@@ -226,6 +226,13 @@ export type AssetRuleInput = {
   quantity?: string | number | null;
   limit?: string | number | null;
   price?: string | number | null;
+  refill?: boolean | string | number | null;
+  minQuantity?: string | number | null;
+  maxQuantity?: string | number | null;
+  minBuyPrice?: string | number | null;
+  maxBuyPrice?: string | number | null;
+  minSellPrice?: string | number | null;
+  maxSellPrice?: string | number | null;
 };
 
 export type AssetRuleConfig = {
@@ -236,6 +243,10 @@ export type AssetRuleConfig = {
   quantity: number;
   limit: number | null;
   price: number;
+  refill: boolean;
+  minQuantity: number;
+  minPrice: number | null;
+  maxPrice: number | null;
 };
 
 export type BotInputConfig = {
@@ -628,20 +639,52 @@ export function parseAssetRules(input?: AssetRuleInput[] | null): AssetRuleConfi
     return [];
   }
 
-  return input
-    .filter(isRunnableAssetRuleInput)
-    .map((rule, index) => parseAssetRule(rule, index));
+  return input.flatMap((rule, index) => {
+    if (!isRunnableAssetRuleInput(rule)) {
+      return [];
+    }
+    return parseAssetRuleInput(rule, index);
+  });
 }
 
 function isRunnableAssetRuleInput(rule: AssetRuleInput | null | undefined): rule is AssetRuleInput {
+  if (!String(rule?.asset ?? '').trim()) {
+    return false;
+  }
+
+  if (isStrategyAssetRuleInput(rule)) {
+    return Boolean(String(rule?.minQuantity ?? '').trim() && String(rule?.maxQuantity ?? '').trim());
+  }
+
   return Boolean(
-    String(rule?.asset ?? '').trim() &&
-      String(rule?.quantity ?? '').trim() &&
+    String(rule?.quantity ?? '').trim() &&
       String(rule?.price ?? '').trim(),
   );
 }
 
+function isStrategyAssetRuleInput(input: AssetRuleInput | null | undefined): boolean {
+  return (
+    Object.prototype.hasOwnProperty.call(input || {}, 'minQuantity') ||
+    Object.prototype.hasOwnProperty.call(input || {}, 'maxQuantity') ||
+    Object.prototype.hasOwnProperty.call(input || {}, 'minBuyPrice') ||
+    Object.prototype.hasOwnProperty.call(input || {}, 'maxBuyPrice') ||
+    Object.prototype.hasOwnProperty.call(input || {}, 'minSellPrice') ||
+    Object.prototype.hasOwnProperty.call(input || {}, 'maxSellPrice')
+  );
+}
+
+function parseAssetRuleInput(input: AssetRuleInput, index?: number): AssetRuleConfig[] {
+  if (isStrategyAssetRuleInput(input)) {
+    return parseStrategyAssetRule(input, index);
+  }
+  return [parseLegacyAssetRule(input, index)];
+}
+
 export function parseAssetRule(input: AssetRuleInput, index?: number): AssetRuleConfig {
+  return parseAssetRuleInput(input, index)[0];
+}
+
+function parseLegacyAssetRule(input: AssetRuleInput, index?: number): AssetRuleConfig {
   const label = typeof index === 'number' ? 'assetRules[' + index + ']' : 'assetRule';
 
   const starbase = parseStarbaseName(input.starbase, label + '.starbase');
@@ -660,7 +703,74 @@ export function parseAssetRule(input: AssetRuleInput, index?: number): AssetRule
     quantity,
     limit,
     price,
+    refill: true,
+    minQuantity: side === 'buy' ? 1 : quantity,
+    minPrice: null,
+    maxPrice: null,
   };
+}
+
+function parseStrategyAssetRule(input: AssetRuleInput, index?: number): AssetRuleConfig[] {
+  const label = typeof index === 'number' ? 'assetRules[' + index + ']' : 'assetRule';
+  const starbase = parseStarbaseName(input.starbase, label + '.starbase');
+  const asset = parseNonEmptyString(input.asset, label + '.asset');
+  const group = normalizeAssetRuleGroup(input.group, asset);
+  const minQuantity = parseRuleQuantity(input.minQuantity, label + '.minQuantity');
+  const maxQuantity = parseRuleQuantity(input.maxQuantity, label + '.maxQuantity');
+  if (maxQuantity < minQuantity) {
+    throw new Error(`${label}.maxQuantity must be greater than or equal to minQuantity`);
+  }
+
+  const refill = parseOptionalBoolean(input.refill, true);
+  const minBuyPrice = parseOptionalRulePrice(input.minBuyPrice, label + '.minBuyPrice');
+  const maxBuyPrice = parseOptionalRulePrice(input.maxBuyPrice, label + '.maxBuyPrice');
+  const minSellPrice = parseOptionalRulePrice(input.minSellPrice, label + '.minSellPrice');
+  const maxSellPrice = parseOptionalRulePrice(input.maxSellPrice, label + '.maxSellPrice');
+  const rules: AssetRuleConfig[] = [];
+
+  if (maxBuyPrice !== null) {
+    if (minBuyPrice !== null && minBuyPrice > maxBuyPrice) {
+      throw new Error(`${label}.minBuyPrice must be less than or equal to maxBuyPrice`);
+    }
+    rules.push({
+      starbase,
+      asset,
+      group,
+      side: 'buy',
+      quantity: maxQuantity,
+      limit: maxQuantity,
+      price: maxBuyPrice,
+      refill,
+      minQuantity,
+      minPrice: minBuyPrice,
+      maxPrice: maxBuyPrice,
+    });
+  }
+
+  if (minSellPrice !== null) {
+    if (maxSellPrice !== null && maxSellPrice < minSellPrice) {
+      throw new Error(`${label}.maxSellPrice must be greater than or equal to minSellPrice`);
+    }
+    rules.push({
+      starbase,
+      asset,
+      group,
+      side: 'sell',
+      quantity: minQuantity,
+      limit: maxQuantity,
+      price: minSellPrice,
+      refill,
+      minQuantity,
+      minPrice: minSellPrice,
+      maxPrice: maxSellPrice,
+    });
+  }
+
+  if (rules.length === 0) {
+    throw new Error(`${label} must define Max Buy Price or Min Sell Price`);
+  }
+
+  return rules;
 }
 
 function parseAssetRuleSide(value: string | null | undefined, fieldName: string): AssetRuleSide {
@@ -716,6 +826,14 @@ function parseOptionalRuleLimit(value: string | number | null | undefined, field
   return parsed;
 }
 
+function parseOptionalRulePrice(value: string | number | null | undefined, fieldName: string): number | null {
+  if (value === null || typeof value === 'undefined' || String(value).trim() === '') {
+    return null;
+  }
+
+  return parseRulePrice(value, fieldName);
+}
+
 function parseRulePrice(value: string | number | null | undefined, fieldName: string): number {
   const parsed =
     typeof value === 'number'
@@ -729,6 +847,26 @@ function parseRulePrice(value: string | number | null | undefined, fieldName: st
   }
 
   return parsed;
+}
+
+function parseOptionalBoolean(value: boolean | string | number | null | undefined, fallback: boolean): boolean {
+  if (typeof value === 'undefined' || value === null || value === '') {
+    return fallback;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['false', '0', 'off', 'no', 'unchecked'].includes(normalized)) {
+    return false;
+  }
+  if (['true', '1', 'on', 'yes', 'checked'].includes(normalized)) {
+    return true;
+  }
+  return fallback;
 }
 
 function parseNonEmptyString(value: string | null | undefined, fieldName: string): string {
@@ -911,6 +1049,17 @@ function roundDown(value: number, decimals: number): number {
 function roundUp(value: number, decimals: number): number {
   const factor = Math.pow(10, decimals);
   return Math.ceil(value * factor) / factor;
+}
+
+function clampPrice(value: number, minPrice?: number | null, maxPrice?: number | null): number {
+  let next = value;
+  if (typeof minPrice === 'number') {
+    next = Math.max(next, minPrice);
+  }
+  if (typeof maxPrice === 'number') {
+    next = Math.min(next, maxPrice);
+  }
+  return next;
 }
 
 function sortOrdersForSide(side: AssetRuleSide, orders: Order[]): Order[] {
@@ -2254,6 +2403,7 @@ export class LmMarketBot {
     allSellOrders: Order[],
     minPrice: number,
     minRelevantQuantity: number,
+    maxPrice?: number | null,
   ): number {
     const externalSellOrders = allSellOrders
       .filter(
@@ -2264,31 +2414,31 @@ export class LmMarketBot {
       .sort((a, b) => a.uiPrice - b.uiPrice);
 
     if (externalSellOrders.length === 0) {
-      return minPrice;
+      return clampPrice(minPrice, minPrice, maxPrice);
     }
 
     const bestSell = externalSellOrders[0];
 
     if (bestSell.uiPrice >= minPrice) {
       const undercutPrice = Math.max(0, bestSell.uiPrice - ORDER_PRICE_NUDGE);
-      return Math.max(minPrice, roundDown(undercutPrice, 6));
+      return clampPrice(Math.max(minPrice, roundDown(undercutPrice, 6)), minPrice, maxPrice);
     }
 
     const nextHigherSell = externalSellOrders.find((o) => o.uiPrice >= minPrice);
 
     if (nextHigherSell) {
       const undercutPrice = Math.max(0, nextHigherSell.uiPrice - ORDER_PRICE_NUDGE);
-      return Math.max(minPrice, roundDown(undercutPrice, 6));
+      return clampPrice(Math.max(minPrice, roundDown(undercutPrice, 6)), minPrice, maxPrice);
     }
 
-    return minPrice;
+    return clampPrice(minPrice, minPrice, maxPrice);
   }
 
   private getTargetBuyPrice(
     allBuyOrders: Order[],
     maxBuyPrice: number,
     minRelevantQuantity: number,
-    options?: { outbidPct?: number },
+    options?: { outbidPct?: number; minPrice?: number | null },
   ): number {
     const externalBuyOrders = allBuyOrders
       .filter(
@@ -2299,33 +2449,33 @@ export class LmMarketBot {
       .sort((a, b) => b.uiPrice - a.uiPrice);
 
     if (externalBuyOrders.length === 0) {
-      return maxBuyPrice;
+      return clampPrice(maxBuyPrice, options?.minPrice ?? null, maxBuyPrice);
     }
 
     const bestBuy = externalBuyOrders[0];
 
     if (bestBuy.uiPrice < maxBuyPrice - ORDER_PRICE_EPSILON) {
       const improvedBid = options?.outbidPct ? bestBuy.uiPrice * (1 + options.outbidPct) : bestBuy.uiPrice + ORDER_PRICE_NUDGE;
-      return Math.min(maxBuyPrice, roundUp(improvedBid, 6));
+      return clampPrice(Math.min(maxBuyPrice, roundUp(improvedBid, 6)), options?.minPrice ?? null, maxBuyPrice);
     }
 
     if (Math.abs(bestBuy.uiPrice - maxBuyPrice) < ORDER_PRICE_EPSILON) {
       const nextLowerBuy = externalBuyOrders.find((o) => o.uiPrice < maxBuyPrice - ORDER_PRICE_EPSILON);
       if (nextLowerBuy) {
         const improvedBid = options?.outbidPct ? nextLowerBuy.uiPrice * (1 + options.outbidPct) : nextLowerBuy.uiPrice + ORDER_PRICE_NUDGE;
-        return Math.min(maxBuyPrice, roundUp(improvedBid, 6));
+        return clampPrice(Math.min(maxBuyPrice, roundUp(improvedBid, 6)), options?.minPrice ?? null, maxBuyPrice);
       }
-      return maxBuyPrice;
+      return clampPrice(maxBuyPrice, options?.minPrice ?? null, maxBuyPrice);
     }
 
     const nextLowerBuy = externalBuyOrders.find((o) => o.uiPrice <= maxBuyPrice);
 
     if (nextLowerBuy) {
       const improvedBid = options?.outbidPct ? nextLowerBuy.uiPrice * (1 + options.outbidPct) : nextLowerBuy.uiPrice + ORDER_PRICE_NUDGE;
-      return Math.min(maxBuyPrice, roundUp(improvedBid, 6));
+      return clampPrice(Math.min(maxBuyPrice, roundUp(improvedBid, 6)), options?.minPrice ?? null, maxBuyPrice);
     }
 
-    return maxBuyPrice;
+    return clampPrice(maxBuyPrice, options?.minPrice ?? null, maxBuyPrice);
   }
 
   private async readMyOpenOrdersForResource(
@@ -2416,7 +2566,7 @@ export class LmMarketBot {
     });
     const cargoSellBalance = rule ? await this.getStarbaseCargoPodBalance(rule, resource) : null;
     const relevantSellQuantity = getRelevantOrderThreshold(minSellQuantity, this.config.relevantSellOrderPct);
-    const targetPrice = this.getTargetSellPrice(allOrders, minPrice, relevantSellQuantity);
+    const targetPrice = this.getTargetSellPrice(allOrders, minPrice, relevantSellQuantity, rule?.maxPrice);
 
     this.logger.info(`${resource.name} wallet sell availability: ${walletSellBalance}`);
     if (cargoSellBalance !== null) {
@@ -2488,7 +2638,8 @@ export class LmMarketBot {
       typeof limit === 'number' &&
       remainingSellAllowance > 0 &&
       freeAvailableQuantity >= remainingSellAllowance;
-    const shouldResizeForAvailableInventory = addableAvailableQuantity >= minSellQuantity || canTopUpToSellLimit;
+    const refillEnabled = rule?.refill !== false;
+    const shouldResizeForAvailableInventory = refillEnabled && (addableAvailableQuantity >= minSellQuantity || canTopUpToSellLimit);
     const shouldResizeForLimit = typeof limit === 'number' && activeQuantity > limit;
     const shouldReplaceForPrice = sortedMyOrders.some((order) => Math.abs(order.uiPrice - targetPrice) >= ORDER_PRICE_EPSILON);
     const shouldConsolidateOrders = sortedMyOrders.length > 1;
@@ -2569,10 +2720,12 @@ export class LmMarketBot {
     await this.detectFills(resource, 'buy', myOrders, cancelledIds);
 
     const maxBuyQuantity = rule.quantity;
+    const minBuyQuantity = rule.minQuantity;
     const maxBuyPrice = rule.price;
     const inventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name, { refresh: true });
     const remainingBuyAllowance = Math.max(0, Math.floor((rule.limit ?? Number.POSITIVE_INFINITY) - inventoryBalance));
-    const targetQuantity = Math.min(maxBuyQuantity, remainingBuyAllowance);
+    const possibleTargetQuantity = Math.min(maxBuyQuantity, remainingBuyAllowance);
+    const targetQuantity = possibleTargetQuantity >= minBuyQuantity ? possibleTargetQuantity : 0;
     const relevantBuyQuantity = getRelevantOrderThreshold(Math.max(1, targetQuantity), this.config.relevantBuyOrderPct);
     const targetPrice =
       targetQuantity > 0
@@ -2580,7 +2733,7 @@ export class LmMarketBot {
             allOrders,
             maxBuyPrice,
             relevantBuyQuantity,
-            isShipMarket ? { outbidPct: SHIP_BUY_OUTBID_PCT } : undefined,
+            { ...(isShipMarket ? { outbidPct: SHIP_BUY_OUTBID_PCT } : {}), minPrice: rule.minPrice },
           )
         : maxBuyPrice;
 

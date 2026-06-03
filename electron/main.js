@@ -336,15 +336,31 @@ function normalizeAssetRules(rows) {
   if (!Array.isArray(rows)) {
     return [];
   }
-  return rows.map((row) => ({
-    starbase: String(row?.starbase ?? ''),
-    asset: String(row?.asset ?? ''),
-    side: row?.side === 'buy' ? 'buy' : 'sell',
-    quantity: String(row?.quantity ?? ''),
-    limit: String(row?.limit ?? ''),
-    price: String(row?.price ?? ''),
-    group: String(row?.group ?? ''),
-  }));
+  return rows.map((row) => {
+    const isStrategyRow = ['minQuantity', 'maxQuantity', 'minBuyPrice', 'maxBuyPrice', 'minSellPrice', 'maxSellPrice']
+      .some((field) => Object.prototype.hasOwnProperty.call(row || {}, field));
+    const side = row?.side === 'buy' ? 'buy' : 'sell';
+    const quantity = String(row?.quantity ?? '');
+    const limit = String(row?.limit ?? '');
+    const price = String(row?.price ?? '');
+
+    return {
+      starbase: String(row?.starbase ?? ''),
+      asset: String(row?.asset ?? ''),
+      side,
+      quantity,
+      limit,
+      price,
+      group: String(row?.group ?? ''),
+      refill: row?.refill === false || row?.refill === 'false' ? false : true,
+      minQuantity: String(row?.minQuantity ?? (isStrategyRow ? '' : side === 'sell' ? quantity : '1')),
+      maxQuantity: String(row?.maxQuantity ?? (isStrategyRow ? '' : limit || quantity)),
+      minBuyPrice: String(row?.minBuyPrice ?? ''),
+      maxBuyPrice: String(row?.maxBuyPrice ?? (isStrategyRow ? '' : side === 'buy' ? price : '')),
+      minSellPrice: String(row?.minSellPrice ?? (isStrategyRow ? '' : side === 'sell' ? price : '')),
+      maxSellPrice: String(row?.maxSellPrice ?? ''),
+    };
+  });
 }
 
 async function loadManagedAssetRegistryOrThrow(config) {
