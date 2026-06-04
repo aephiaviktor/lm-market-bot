@@ -585,13 +585,9 @@ h3 {
 }
 
 .tab-panel[data-panel="setup"] .panel-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   margin-top: 0;
   margin-bottom: 14px;
-  padding: 12px 0 14px;
-  background: rgba(8, 26, 48, 0.95);
+  padding: 0 0 12px;
   border-bottom: 1px solid rgba(143, 193, 255, 0.12);
 }
 
