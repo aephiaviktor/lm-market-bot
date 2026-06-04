@@ -226,7 +226,7 @@ async function fetchGithubJson(url) {
 }
 
 async function getLatestGithubVersion() {
-  const remotePackage = await fetchGithubJson(GITHUB_MAIN_PACKAGE_URL);
+  const remotePackage = await fetchGithubJson(`${GITHUB_MAIN_PACKAGE_URL}?t=${Date.now()}`);
   const version = normalizeVersion(remotePackage?.version);
 
   if (!version) {
