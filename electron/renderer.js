@@ -15,7 +15,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.2.9';
+const APP_VERSION = '0.2.10';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
   'FACTION',
@@ -807,6 +807,13 @@ function renderOpenOrders(orders) {
   }
 
   const sortedOrders = sortByAssetRuleOrder(orders, (order) => order?.asset);
+  sortedOrders.sort((a, b) => {
+    const starbaseComparison = compareStarbaseLabels(a?.starbase, b?.starbase);
+    if (starbaseComparison !== 0) {
+      return starbaseComparison;
+    }
+    return 0;
+  });
 
   for (const order of sortedOrders) {
     const item = document.createElement('div');
@@ -826,6 +833,7 @@ function renderOpenOrders(orders) {
     item.innerHTML = `
       <div class="status-item-top">
         <div class="order-left">
+          <span class="inventory-starbase order-starbase">${order.starbase || '—'}</span>
           <span class="order-asset">${order.asset || 'Unknown Asset'}</span>
           <span class="badge ${order.side === 'buy' ? 'buy' : 'sell'}">${order.side}</span>
           ${order.marketLeader === 'hb' ? '<span class="badge leader">BB</span>' : ''}

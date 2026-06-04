@@ -297,6 +297,7 @@ type OpenOrderReadOptions = {
 type OpenOrderStatusTarget = {
   resource: ResourceConfig;
   displayResource: ResourceConfig;
+  starbase: string;
   sideFilter?: AssetRuleSide;
   ruleIndex?: number;
   passiveCache: boolean;
@@ -404,6 +405,7 @@ export type BotLogger = {
 
 export type BotOpenOrderStatus = {
   id: string;
+  starbase: string;
   asset: string;
   mint: string;
   side: AssetRuleSide;
@@ -3088,6 +3090,7 @@ export class LmMarketBot {
             const remaining = getOrderRemainingQuantity(order);
             openOrders.push({
               id: order.id,
+              starbase: target.starbase,
               asset: getResourceLabel(target.displayResource),
               mint: mintKey,
               side,
@@ -3137,7 +3140,7 @@ export class LmMarketBot {
   }
 
   private getOpenOrderTargetCacheKey(target: OpenOrderStatusTarget): string {
-    return `${target.resource.mint.toBase58()}:${target.sideFilter ?? 'all'}:${target.ruleIndex ?? 'resource'}`;
+    return `${target.starbase}:${target.resource.mint.toBase58()}:${target.sideFilter ?? 'all'}:${target.ruleIndex ?? 'resource'}`;
   }
 
   private async buildOpenOrderStatusTargets(): Promise<OpenOrderStatusTarget[]> {
@@ -3145,6 +3148,7 @@ export class LmMarketBot {
       return this.statusResources.map((resource) => ({
         resource,
         displayResource: resource,
+        starbase: '',
         passiveCache: false,
       }));
     }
@@ -3170,6 +3174,7 @@ export class LmMarketBot {
       targets.push({
         resource: queryResource,
         displayResource: rawResource,
+        starbase: normalizeStarbaseName(rule.starbase),
         sideFilter: rule.side,
         ruleIndex: index,
         passiveCache: false,
