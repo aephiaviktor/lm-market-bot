@@ -585,8 +585,8 @@ h3 {
 }
 
 .tab-panel[data-panel="setup"] .panel-toolbar {
-  margin-top: 0;
-  padding-right: 0;
+  margin-top: -34px;
+  padding-right: 24px;
 }
 
 .panel-toolbar h2 {
@@ -1046,4 +1046,25 @@ button:disabled {
   background: linear-gradient(135deg, #1d86c9, #4cc3ff);
   color: #04111f;
   border-color: transparent;
+}
+
+.sensitive-toggle {
+  border: 1px solid rgba(255, 184, 108, 0.55);
+  background: rgba(255, 200, 140, 0.18);
+  color: #ffd6a8;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.sensitive-toggle:hover {
+  background: rgba(255, 200, 140, 0.3);
+  border-color: rgba(255, 184, 108, 0.85);
+}
+
+.sensitive-toggle:active {
+  background: rgba(255, 200, 140, 0.4);
 }
