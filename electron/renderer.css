@@ -559,17 +559,7 @@ h3 {
 }
 
 .tab-panel[data-panel="setup"].active {
-  overflow-x: hidden;
-  overflow-y: scroll;
-  scrollbar-gutter: stable;
-  padding-right: 4px;
-}
-
-.tab-panel[data-panel="setup"].active::after {
-  content: '';
-  display: block;
-  min-height: 18px;
-  flex: 0 0 18px;
+  overflow: visible;
 }
 
 .panel-toolbar {
@@ -585,10 +575,27 @@ h3 {
 }
 
 .tab-panel[data-panel="setup"] .panel-toolbar {
-  margin-top: 0;
+  margin-top: -34px;
   margin-bottom: 14px;
-  padding: 0 0 12px;
-  border-bottom: 1px solid rgba(143, 193, 255, 0.12);
+  padding-right: 0;
+}
+
+.tab-panel[data-panel="setup"] .setup-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
+}
+
+.tab-panel[data-panel="setup"] .setup-scroll::after {
+  content: '';
+  display: block;
+  min-height: 18px;
+  flex: 0 0 18px;
 }
 
 .panel-toolbar h2 {
