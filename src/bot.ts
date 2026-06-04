@@ -2423,7 +2423,7 @@ export class LmMarketBot {
       .sort((a, b) => a.uiPrice - b.uiPrice);
 
     if (externalSellOrders.length === 0) {
-      return clampPrice(minPrice, minPrice, maxPrice);
+      return clampPrice(maxPrice ?? minPrice, minPrice, maxPrice ?? minPrice);
     }
 
     const bestSell = externalSellOrders[0];
@@ -2440,7 +2440,7 @@ export class LmMarketBot {
       return clampPrice(Math.max(minPrice, roundDown(undercutPrice, 6)), minPrice, maxPrice);
     }
 
-    return clampPrice(minPrice, minPrice, maxPrice);
+    return clampPrice(maxPrice ?? minPrice, minPrice, maxPrice ?? minPrice);
   }
 
   private getTargetBuyPrice(
@@ -2458,7 +2458,7 @@ export class LmMarketBot {
       .sort((a, b) => b.uiPrice - a.uiPrice);
 
     if (externalBuyOrders.length === 0) {
-      return clampPrice(maxBuyPrice, options?.minPrice ?? null, maxBuyPrice);
+      return clampPrice(options?.minPrice ?? maxBuyPrice, options?.minPrice ?? null, maxBuyPrice);
     }
 
     const bestBuy = externalBuyOrders[0];
@@ -2484,7 +2484,7 @@ export class LmMarketBot {
       return clampPrice(Math.min(maxBuyPrice, roundUp(improvedBid, 6)), options?.minPrice ?? null, maxBuyPrice);
     }
 
-    return clampPrice(maxBuyPrice, options?.minPrice ?? null, maxBuyPrice);
+    return clampPrice(options?.minPrice ?? maxBuyPrice, options?.minPrice ?? null, maxBuyPrice);
   }
 
   private async readMyOpenOrdersForResource(
