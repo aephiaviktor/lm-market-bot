@@ -120,6 +120,20 @@ h3 {
   margin-bottom: 10px;
 }
 
+.app-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.app-header-logo {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: block;
+}
+
 .panel,
 .status-panel {
   background: rgba(10, 30, 60, 0.92);
