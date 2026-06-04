@@ -15,7 +15,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.2.6';
+const APP_VERSION = '0.2.7';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
   'FACTION',
@@ -439,13 +439,13 @@ function renderAssetRuleRows() {
       </td>
       <td>
         <div class="cell-stack compact-cell">
-          <input data-index="${index}" data-field="minQuantity" type="number" min="0" step="1" inputmode="numeric" />
+          <input data-index="${index}" data-field="minQuantity" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
           <span class="cell-hint">Min order</span>
         </div>
       </td>
       <td>
         <div class="cell-stack compact-cell">
-          <input data-index="${index}" data-field="maxQuantity" type="number" min="0" step="1" inputmode="numeric" />
+          <input data-index="${index}" data-field="maxQuantity" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
           <span class="cell-hint">Max active</span>
         </div>
       </td>
@@ -515,8 +515,11 @@ function renderAssetRuleRows() {
     starbaseSelect.value = starbaseOptions.includes(row.starbase) ? row.starbase : starbaseOptions[0];
     assetSelect.value = options.some((option) => option.value === row.asset) ? row.asset : '';
     refillInput.checked = row.refill !== false;
+    const formattedIntegerFields = new Set(['minQuantity', 'maxQuantity']);
     for (const [field, input] of Object.entries(fieldsByName)) {
-      input.value = row[field] ?? '';
+      input.value = formattedIntegerFields.has(field)
+        ? formatIntegerWithSeparators(row[field] ?? '')
+        : row[field] ?? '';
     }
 
     starbaseSelect.addEventListener('change', (event) => {
@@ -535,8 +538,45 @@ function renderAssetRuleRows() {
 
     for (const [field, input] of Object.entries(fieldsByName)) {
       input.addEventListener('input', (event) => {
+        if (formattedIntegerFields.has(field)) {
+          const raw = event.target.value;
+          const cursor = event.target.selectionStart ?? raw.length;
+          const digitsBeforeCursor = raw.slice(0, cursor).replace(/[^\d-]/g, '').length;
+          const stripped = stripIntegerSeparators(raw);
+          assetRuleRows[index][field] = stripped;
+          const formatted = formatIntegerWithSeparators(stripped);
+          if (formatted !== raw) {
+            event.target.value = formatted;
+            let newCursor = 0;
+            let digitsSeen = 0;
+            for (let i = 0; i < formatted.length; i++) {
+              if (digitsSeen >= digitsBeforeCursor) {
+                newCursor = i;
+                break;
+              }
+              if (/\d/.test(formatted[i])) {
+                digitsSeen++;
+              }
+              newCursor = i + 1;
+            }
+            try {
+              event.target.setSelectionRange(newCursor, newCursor);
+            } catch {
+              // ignore: number/text inputs do not support setSelectionRange in some contexts
+            }
+          }
+          return;
+        }
         assetRuleRows[index][field] = event.target.value;
       });
+
+      if (formattedIntegerFields.has(field)) {
+        input.addEventListener('change', (event) => {
+          const stripped = stripIntegerSeparators(event.target.value);
+          assetRuleRows[index][field] = stripped;
+          event.target.value = formatIntegerWithSeparators(stripped);
+        });
+      }
     }
 
     const cancelOrderBtn = tr.querySelector('.cancel-order-btn');
@@ -635,6 +675,38 @@ function formatNumber(value, maximumFractionDigits = 6) {
     minimumFractionDigits: 0,
     maximumFractionDigits,
   }).format(value);
+}
+
+function formatIntegerWithSeparators(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return '';
+  }
+  const digitsOnly = text.replace(/[^\d-]/g, '');
+  if (!digitsOnly || digitsOnly === '-') {
+    return '';
+  }
+  const negative = digitsOnly.startsWith('-');
+  const unsigned = negative ? digitsOnly.slice(1) : digitsOnly;
+  if (!/^\d+$/.test(unsigned)) {
+    return '';
+  }
+  const grouped = new Intl.NumberFormat(undefined, { useGrouping: true }).format(Number(unsigned));
+  return negative ? `-${grouped}` : grouped;
+}
+
+function stripIntegerSeparators(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return '';
+  }
+  return text.replace(/[^\d-]/g, '');
 }
 
 function formatTimestamp(value) {
@@ -1126,8 +1198,8 @@ function normalizeAssetRulesForDiff(rows) {
       group: String(row?.group ?? '').trim(),
       asset: String(row?.asset ?? '').trim(),
       refill: row?.refill === false || row?.refill === 'false' ? '0' : '1',
-      minQuantity: String(row?.minQuantity ?? '').trim(),
-      maxQuantity: String(row?.maxQuantity ?? '').trim(),
+      minQuantity: String(row?.minQuantity ?? '').replace(/[^\d-]/g, '').trim(),
+      maxQuantity: String(row?.maxQuantity ?? '').replace(/[^\d-]/g, '').trim(),
       minBuyPrice: String(row?.minBuyPrice ?? '').trim(),
       maxBuyPrice: String(row?.maxBuyPrice ?? '').trim(),
       minSellPrice: String(row?.minSellPrice ?? '').trim(),
