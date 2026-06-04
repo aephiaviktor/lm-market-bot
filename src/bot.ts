@@ -351,6 +351,7 @@ type IndexedAssetRule = {
 type GroupedAssetRules = {
   asset: string;
   group: AssetRegistryGroup;
+  starbase: string;
   rules: IndexedAssetRule[];
 };
 
@@ -1106,7 +1107,12 @@ function groupRulesByAsset(rules: AssetRuleConfig[]): Map<string, GroupedAssetRu
   const grouped = new Map<string, GroupedAssetRules>();
 
   rules.forEach((rule, index) => {
-    const key = rule.group + '|' + normalizeAssetKey(rule.asset);
+    const key =
+      rule.group +
+      '|' +
+      normalizeStarbaseName(rule.starbase) +
+      '|' +
+      normalizeAssetKey(rule.asset);
     const item = { index, rule };
     const existing = grouped.get(key);
 
@@ -1116,6 +1122,7 @@ function groupRulesByAsset(rules: AssetRuleConfig[]): Map<string, GroupedAssetRu
       grouped.set(key, {
         asset: rule.asset,
         group: rule.group,
+        starbase: normalizeStarbaseName(rule.starbase),
         rules: [item],
       });
     }
@@ -2912,8 +2919,8 @@ export class LmMarketBot {
     }
   }
 
-  private clearFailedAssetRetry(asset: string) {
-    const key = asset.toLowerCase();
+  private clearFailedAssetRetry(starbase: string, asset: string) {
+    const key = `${normalizeStarbaseName(starbase)}|${asset.toLowerCase()}`;
     const timer = this.failedAssetRetryTimers.get(key);
     if (timer) {
       clearTimeout(timer);
@@ -2922,11 +2929,12 @@ export class LmMarketBot {
     this.failedAssetRetryAttempts.delete(key);
   }
 
-  private findCurrentAssetRuleGroup(asset: string): GroupedAssetRules | null {
-    const key = asset.toLowerCase();
+  private findCurrentAssetRuleGroup(starbase: string, asset: string): GroupedAssetRules | null {
+    const targetStarbase = normalizeStarbaseName(starbase);
+    const targetAsset = asset.toLowerCase();
     const groupedRules = groupRulesByAsset(this.config.assetRules);
     for (const group of groupedRules.values()) {
-      if (group.asset.toLowerCase() === key) {
+      if (group.starbase === targetStarbase && group.asset.toLowerCase() === targetAsset) {
         return group;
       }
     }
@@ -2934,7 +2942,7 @@ export class LmMarketBot {
   }
 
   private scheduleFailedAssetRetry(group: GroupedAssetRules) {
-    const key = group.asset.toLowerCase();
+    const key = `${group.starbase}|${group.asset.toLowerCase()}`;
     if (this.failedAssetRetryTimers.has(key)) {
       return;
     }
@@ -2956,25 +2964,25 @@ export class LmMarketBot {
 
     const timer = setTimeout(() => {
       this.failedAssetRetryTimers.delete(key);
-      void this.retryFailedAssetRuleGroup(group.asset);
+      void this.retryFailedAssetRuleGroup(group.starbase, group.asset);
     }, retryDelayMs);
     this.failedAssetRetryTimers.set(key, timer);
   }
 
-  private async retryFailedAssetRuleGroup(asset: string) {
+  private async retryFailedAssetRuleGroup(starbase: string, asset: string) {
     if (!this.running) {
       return;
     }
 
-    const group = this.findCurrentAssetRuleGroup(asset);
+    const group = this.findCurrentAssetRuleGroup(starbase, asset);
     if (!group) {
-      this.clearFailedAssetRetry(asset);
+      this.clearFailedAssetRetry(starbase, asset);
       return;
     }
 
     try {
       await this.processAssetRuleGroup(group);
-      this.clearFailedAssetRetry(asset);
+      this.clearFailedAssetRetry(starbase, asset);
       this.logger.info(`Retry succeeded for asset ${group.asset}.`);
     } catch (err) {
       this.logger.error(`Retry failed for asset ${group.asset}:`, err);
@@ -3024,7 +3032,7 @@ export class LmMarketBot {
           this.scheduleFailedAssetRetry(group);
           continue;
         }
-        this.clearFailedAssetRetry(group.asset);
+        this.clearFailedAssetRetry(group.starbase, group.asset);
       }
       return;
     }
