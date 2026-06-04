@@ -594,7 +594,7 @@ h3 {
 }
 
 .rules-table {
-  min-width: 1040px;
+  min-width: 1160px;
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
@@ -661,7 +661,7 @@ h3 {
 .rules-table td:nth-child(4),
 .rules-table th:nth-child(5),
 .rules-table td:nth-child(5) {
-  width: 92px;
+  width: 110px;
 }
 
 .rules-table td:nth-child(4) input,
@@ -672,8 +672,8 @@ h3 {
 .rules-table td:nth-child(9) input {
   width: 100%;
   min-width: 0;
-  padding-left: 7px;
-  padding-right: 7px;
+  padding-left: 5px;
+  padding-right: 5px;
 }
 
 .rules-table th:nth-child(6),
@@ -684,7 +684,7 @@ h3 {
 .rules-table td:nth-child(8),
 .rules-table th:nth-child(9),
 .rules-table td:nth-child(9) {
-  width: 94px;
+  width: 112px;
 }
 
 .refill-cell input {
