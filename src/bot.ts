@@ -88,12 +88,22 @@ class RpcRequestRateLimiter {
     private readonly getRequestsPerSecond: () => number,
     private readonly logger: BotLogger,
     private readonly useSharedLimiter: () => boolean,
+    private readonly metricsApp: string,
+    private readonly metricsProfile: string = 'default',
   ) {}
 
-  async wait(label: string, bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared'): Promise<void> {
+  async wait(label: string, bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared', method: string = label): Promise<void> {
     if (this.useSharedLimiter()) {
       const sharedStartedAt = Date.now();
-      await this.sharedLimiter.wait(bucketName, { label });
+      const waitOptions = {
+        label,
+        metrics: {
+          app: this.metricsApp,
+          profile: this.metricsProfile,
+          method,
+        },
+      };
+      await this.sharedLimiter.wait(bucketName, waitOptions);
       const sharedWaitMs = Date.now() - sharedStartedAt;
       const logKey = `${bucketName}:${label}`;
       const lastLoggedAt = this.lastSharedWaitLogAtMs.get(logKey) ?? 0;
@@ -176,10 +186,11 @@ async function callRpcWithRateLimitRetry<T>(
   limiter: RpcRequestRateLimiter,
   logger: BotLogger,
   bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared',
+  method: string = label,
 ): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
-      await limiter.wait(label, bucketName);
+      await limiter.wait(label, bucketName, method);
       return await invoke();
     } catch (error) {
       const retryDelayMs = RPC_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
@@ -202,10 +213,11 @@ function createFailoverConnection(
   logger: BotLogger,
   getRequestsPerSecond: () => number,
   useSharedLimiter: () => boolean,
+  metricsProfile: string,
 ): Connection {
   const primary = new Connection(primaryUrl, { commitment: 'confirmed' });
   const fallback = fallbackUrl && fallbackUrl !== primaryUrl ? new Connection(fallbackUrl, { commitment: 'confirmed' }) : null;
-  const limiter = new RpcRequestRateLimiter(getRequestsPerSecond, logger, useSharedLimiter);
+  const limiter = new RpcRequestRateLimiter(getRequestsPerSecond, logger, useSharedLimiter, 'LM Market Bot', metricsProfile);
 
   return new Proxy(primary, {
     get(target, prop, receiver) {
@@ -217,6 +229,7 @@ function createFailoverConnection(
       const fallbackValue = fallback ? Reflect.get(fallback, prop, fallback) : null;
 
       return async (...args: unknown[]) => {
+        const method = String(prop);
         const label = `Connection.${String(prop)}()`;
         const bucketName = prop === 'sendRawTransaction' ? 'tx:shared' : 'rpc:shared';
         try {
@@ -226,6 +239,7 @@ function createFailoverConnection(
             limiter,
             logger,
             bucketName,
+            method,
           );
         } catch (error) {
           if (!fallback || typeof fallbackValue !== 'function') {
@@ -238,6 +252,7 @@ function createFailoverConnection(
             limiter,
             logger,
             bucketName,
+            method,
           );
         }
       };
@@ -413,6 +428,7 @@ export type CancelOrderResult =
 export type BotConfig = {
   rpcUrl: string;
   rpcUrlFallback?: string;
+  faction: string;
   ownerProfile: string;
   hotWalletSecret: string;
   minSellQuantity: number;
@@ -612,6 +628,7 @@ export function buildBotConfig(input: BotInputConfig): BotConfig {
   return {
     rpcUrl: editable.RPC_URL,
     rpcUrlFallback: editable.RPC_URL_FALLBACK || undefined,
+    faction: editable.FACTION,
     ownerProfile: editable.OWNER_PROFILE,
     hotWalletSecret: editable.HOT_WALLET_SECRET,
     minSellQuantity,
@@ -1405,6 +1422,7 @@ export class LmMarketBot {
       this.logger,
       () => this.config.rpcRequestsPerSecond,
       () => this.config.useRpcLimiter,
+      this.config.faction,
     );
     const provider = new AnchorProvider(this.connection, new Wallet(this.wallet), AnchorProvider.defaultOptions());
     this.sageProgram = new Program(
