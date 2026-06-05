@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('botApi', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
   saveSettings: (config) => ipcRenderer.invoke('settings:save', config),
+  sendSettingsToRpcLimiter: (payload) => ipcRenderer.invoke('rpc-limiter:send-settings', payload),
+  getRpcLimiterStatus: () => ipcRenderer.invoke('rpc-limiter:get-status'),
   deriveHotWallet: (secret) => ipcRenderer.invoke('settings:derive-hot-wallet', secret),
   startBot: () => ipcRenderer.invoke('bot:start'),
   stopBot: () => ipcRenderer.invoke('bot:stop'),

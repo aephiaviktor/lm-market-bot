@@ -798,6 +798,81 @@ h3 {
   grid-column: 1 / -1;
 }
 
+.nested-config-grid {
+  gap: 9px 10px;
+}
+
+.settings-subpanel {
+  padding: 10px;
+  border: 1px solid rgba(143, 193, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(4, 16, 34, 0.32);
+}
+
+.rpc-limiter-toggle-row {
+  display: flex;
+  align-items: center;
+}
+
+.checkbox-label {
+  width: fit-content;
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+}
+
+.checkbox-label input {
+  width: 16px;
+  height: 16px;
+  accent-color: #2d9cff;
+}
+
+.rpc-limiter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rpc-limiter-state-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-size: 13px;
+  color: #9fc8ea;
+}
+
+.rpc-limiter-state-row strong {
+  color: #dff2ff;
+}
+
+.rpc-limiter-updated {
+  color: #8fb8d6;
+}
+
+#send-rpc-limiter-btn {
+  align-self: flex-start;
+}
+
+.rpc-limiter-disabled #rpc-limiter-current-url,
+.rpc-limiter-enabled .rpc-send-settings-panel input {
+  color: #9fb3c7;
+  border-color: rgba(143, 193, 255, 0.16);
+  background: rgba(5, 20, 41, 0.5);
+}
+
+.rpc-limiter-disabled .rpc-limiter-panel label,
+.rpc-limiter-enabled .rpc-send-settings-panel label {
+  color: #9fb3c7;
+}
+
+.rpc-limiter-enabled #rpc-limiter-current-url,
+.rpc-limiter-disabled .rpc-send-settings-panel input {
+  color: #ffffff;
+  border-color: rgba(143, 193, 255, 0.28);
+  background: rgba(5, 20, 41, 0.88);
+}
+
 .setup-logs-panel {
   margin-top: 16px;
 }

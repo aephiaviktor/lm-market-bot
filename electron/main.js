@@ -1,8 +1,10 @@
 const { app, BrowserWindow, ipcMain, Menu, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
+const lockfile = require('proper-lockfile');
 const { Keypair } = require('@solana/web3.js');
 const bs58 = require('bs58');
 const packageJson = require('../package.json');
@@ -104,6 +106,12 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-software-rasterizer');
 
+const { resolvePaths } = require('rpc_limiter');
+const {
+  readState: readRpcLimiterState,
+  writeStateSync: writeRpcLimiterStateSync,
+  bumpRevision: bumpRpcLimiterRevision,
+} = require('rpc_limiter/dist/state');
 const { LmMarketBot, buildBotConfig, getEditableConfigFromEnv, EDITABLE_CONFIG_KEYS } = require('../dist/bot');
 const { formatAssetRegistryResourceList, loadAssetRegistryForAephiaKey } = require('../dist/asset-registry');
 
@@ -117,6 +125,7 @@ const AEPHIA_API_KEY_VALIDATION_BYPASS = false; // Re-enable Aephia token valida
 const GITHUB_REPO = 'aephiaviktor/lm-market-bot';
 const GITHUB_MAIN_PACKAGE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/package.json`;
 const GITHUB_MAIN_ARCHIVE_URL = `https://github.com/${GITHUB_REPO}/archive/refs/heads/main.tar.gz`;
+const RPC_LIMITER_UPDATED_BY = 'LM Market Bot';
 console.error('[LmMarketBot] TITLE_SUFFIX =', JSON.stringify(TITLE_SUFFIX));
 console.error('[LmMarketBot] APP_USER_MODEL_ID =', JSON.stringify(APP_USER_MODEL_ID));
 console.error('[LmMarketBot] userData =', JSON.stringify(app.getPath('userData')));
@@ -456,6 +465,121 @@ function normalizeAssetRules(rows) {
   });
 }
 
+function parseBooleanSetting(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function getRpcLimiterPaths() {
+  return resolvePaths();
+}
+
+function buildSharedRpcUrl(state) {
+  const base = String(state?.rpcBaseUrl || '').trim();
+  const apiKey = String(state?.apiKey || '').trim();
+  if (!base) return '';
+  if (!apiKey) return base;
+  try {
+    const url = new URL(base);
+    url.searchParams.set('api-key', apiKey);
+    return url.toString();
+  } catch {
+    const separator = base.includes('?') ? '&' : '?';
+    return `${base}${separator}api-key=${encodeURIComponent(apiKey)}`;
+  }
+}
+
+function getRpcLimiterStatus() {
+  const paths = getRpcLimiterPaths();
+  const state = readRpcLimiterState(paths.stateFile, Date.now());
+  const currentRpcUrl = buildSharedRpcUrl(state);
+
+  return {
+    path: paths.stateFile,
+    enabled: Boolean(state.enabled),
+    rpcBaseUrl: state.rpcBaseUrl || '',
+    apiKey: state.apiKey || '',
+    currentRpcUrl,
+    buckets: state.buckets || {},
+    updatedBy: state.updatedBy || '',
+    updatedAt: state.updatedAt || '',
+    revision: state.revision ?? 0,
+  };
+}
+
+function parseRpcUrlForLimiter(rawValue) {
+  const raw = String(rawValue || '').trim();
+  if (!raw) {
+    throw new Error('RPC URL is empty.');
+  }
+
+  const url = new URL(raw);
+  const apiKey = url.searchParams.get('api-key') || '';
+  url.searchParams.delete('api-key');
+  const remainingQuery = url.searchParams.toString();
+  const pathname = url.pathname === '/' ? '' : url.pathname;
+  const rpcBaseUrl = `${url.origin}${pathname}${remainingQuery ? `?${remainingQuery}` : ''}`;
+
+  return { rpcBaseUrl, apiKey };
+}
+
+function parsePositiveRate(value, fieldName) {
+  const parsed = Number.parseFloat(String(value ?? '').trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${fieldName} must be a positive number.`);
+  }
+  return parsed;
+}
+
+async function withRpcLimiterLock(fn) {
+  const paths = getRpcLimiterPaths();
+  fsSync.mkdirSync(path.dirname(paths.lockfile), { recursive: true });
+  if (!fsSync.existsSync(paths.lockfile)) {
+    fsSync.writeFileSync(paths.lockfile, '');
+  }
+
+  const release = await lockfile.lock(paths.lockfile, {
+    stale: 5000,
+    retries: { retries: 50, minTimeout: 5, maxTimeout: 50, factor: 1.2 },
+    realpath: false,
+  });
+  try {
+    return fn(paths);
+  } finally {
+    await release().catch(() => undefined);
+  }
+}
+
+async function sendSettingsToRpcLimiter(config) {
+  const { rpcBaseUrl, apiKey } = parseRpcUrlForLimiter(config.RPC_URL);
+  const rpcRequestsPerSecond = parsePositiveRate(config.RPC_REQUESTS_PER_SECOND, 'Requests / sec');
+  const txPerSecond = parsePositiveRate(config.RPC_TX_SEND_RATE_LIMIT_PER_SECOND, 'sendTransaction / sec');
+  const rpcIntervalMs = Math.max(1, Math.round(1000 / rpcRequestsPerSecond));
+  const txIntervalMs = Math.max(1, Math.round(1000 / txPerSecond));
+
+  await withRpcLimiterLock((paths) => {
+    const state = readRpcLimiterState(paths.stateFile, Date.now());
+    state.enabled = true;
+    state.rpcBaseUrl = rpcBaseUrl;
+    state.apiKey = apiKey;
+    state.buckets = state.buckets || {};
+    state.buckets['rpc:shared'] = {
+      ...(state.buckets['rpc:shared'] || { nextSlotMs: 0 }),
+      intervalMs: rpcIntervalMs,
+    };
+    state.buckets['tx:shared'] = {
+      ...(state.buckets['tx:shared'] || { nextSlotMs: 0 }),
+      intervalMs: txIntervalMs,
+    };
+    state.updatedBy = RPC_LIMITER_UPDATED_BY;
+    state.updatedAt = new Date().toISOString();
+    bumpRpcLimiterRevision(state);
+    writeRpcLimiterStateSync(paths.stateFile, state);
+  });
+
+  return getRpcLimiterStatus();
+}
+
 async function loadManagedAssetRegistryOrThrow(config) {
   await validateAephiaApiKeyOrThrow(config);
   const assetRegistry = await loadAssetRegistryForAephiaKey(getAephiaApiKey(config));
@@ -527,9 +651,19 @@ async function getEffectiveEditableConfig(options = {}) {
 async function getEffectiveBotInputConfig(options = {}) {
   const editable = await getEffectiveEditableConfig(options);
   const localSettings = await loadLocalSettings();
+  const useRpcLimiter = parseBooleanSetting(editable.USE_RPC_LIMITER);
+  const botConfig = { ...editable };
+
+  if (useRpcLimiter) {
+    const rpcLimiter = getRpcLimiterStatus();
+    if (!rpcLimiter.currentRpcUrl) {
+      throw new Error('Use RPC Limiter is enabled, but no Current RPC Limiter URL is configured. Send settings to RPC Limiter first.');
+    }
+    botConfig.RPC_URL = rpcLimiter.currentRpcUrl;
+  }
 
   return {
-    ...editable,
+    ...botConfig,
     assetRules: normalizeAssetRules(localSettings.ASSET_RULE_ROWS ?? []),
   };
 }
@@ -680,6 +814,7 @@ ipcMain.handle('settings:get', async () => {
     config,
     running: botRunning,
     assetRules: normalizeAssetRules(localSettings.ASSET_RULE_ROWS ?? []),
+    rpcLimiter: getRpcLimiterStatus(),
   };
 });
 
@@ -689,8 +824,16 @@ ipcMain.handle('settings:save', async (_event, payload) => {
   return {
     config,
     assetRules: normalizeAssetRules(saved.ASSET_RULE_ROWS),
+    rpcLimiter: getRpcLimiterStatus(),
   };
 });
+
+ipcMain.handle('rpc-limiter:send-settings', async (_event, payload) => {
+  const sourceConfig = payload?.config && typeof payload.config === 'object' ? payload.config : payload;
+  return await sendSettingsToRpcLimiter(sourceConfig || {});
+});
+
+ipcMain.handle('rpc-limiter:get-status', async () => getRpcLimiterStatus());
 
 ipcMain.handle('settings:derive-hot-wallet', async (_event, secret) => {
   try {

@@ -23,6 +23,7 @@ import {
   type SageIDLProgram,
 } from '@staratlas/sage';
 import { PLAYER_PROFILE_IDL, PlayerProfile, type PlayerProfileIDLProgram } from '@staratlas/player-profile';
+import { RpcLimiter } from 'rpc_limiter';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
 import path from 'path';
@@ -61,6 +62,8 @@ const STARBASE_PLAYER_STARBASE_OFFSET = 73;
 const CARGO_POD_AUTHORITY_OFFSET = 41;
 const CARGO_POD_TOKEN_CACHE_TTL_MS = 60000;
 const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [2000, 5000, 10000];
+const RPC_LIMITER_SLOW_WAIT_LOG_MS = 100;
+const RPC_LIMITER_WAIT_LOG_THROTTLE_MS = 60000;
 const FAILED_ASSET_RETRY_DELAY_MS = 10000;
 const FAILED_ASSET_RETRY_LIMIT = 3;
 const SHIP_BUY_OUTBID_PCT = 0.005;
@@ -78,10 +81,30 @@ const SHIP_MINTS = new Set(
 class RpcRequestRateLimiter {
   private queue: Promise<void> = Promise.resolve();
   private nextRequestAtMs = 0;
+  private readonly sharedLimiter = new RpcLimiter();
+  private readonly lastSharedWaitLogAtMs = new Map<string, number>();
 
-  constructor(private readonly getRequestsPerSecond: () => number) {}
+  constructor(
+    private readonly getRequestsPerSecond: () => number,
+    private readonly logger: BotLogger,
+    private readonly useSharedLimiter: () => boolean,
+  ) {}
 
-  async wait(): Promise<void> {
+  async wait(label: string, bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared'): Promise<void> {
+    if (this.useSharedLimiter()) {
+      const sharedStartedAt = Date.now();
+      await this.sharedLimiter.wait(bucketName, { label });
+      const sharedWaitMs = Date.now() - sharedStartedAt;
+      const logKey = `${bucketName}:${label}`;
+      const lastLoggedAt = this.lastSharedWaitLogAtMs.get(logKey) ?? 0;
+      const now = Date.now();
+      if (sharedWaitMs > RPC_LIMITER_SLOW_WAIT_LOG_MS && now - lastLoggedAt >= RPC_LIMITER_WAIT_LOG_THROTTLE_MS) {
+        const prefix = bucketName === 'tx:shared' ? 'TX limiter' : 'RPC limiter';
+        this.logger.info(`${prefix} waiting for ${label}.`);
+        this.lastSharedWaitLogAtMs.set(logKey, now);
+      }
+    }
+
     const next = this.queue.then(async () => {
       const requestsPerSecond = Math.max(0.000001, this.getRequestsPerSecond());
       const waitMs = Math.max(0, this.nextRequestAtMs - Date.now());
@@ -152,10 +175,11 @@ async function callRpcWithRateLimitRetry<T>(
   invoke: () => Promise<T>,
   limiter: RpcRequestRateLimiter,
   logger: BotLogger,
+  bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared',
 ): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
-      await limiter.wait();
+      await limiter.wait(label, bucketName);
       return await invoke();
     } catch (error) {
       const retryDelayMs = RPC_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
@@ -177,10 +201,11 @@ function createFailoverConnection(
   fallbackUrl: string | undefined,
   logger: BotLogger,
   getRequestsPerSecond: () => number,
+  useSharedLimiter: () => boolean,
 ): Connection {
   const primary = new Connection(primaryUrl, { commitment: 'confirmed' });
   const fallback = fallbackUrl && fallbackUrl !== primaryUrl ? new Connection(fallbackUrl, { commitment: 'confirmed' }) : null;
-  const limiter = new RpcRequestRateLimiter(getRequestsPerSecond);
+  const limiter = new RpcRequestRateLimiter(getRequestsPerSecond, logger, useSharedLimiter);
 
   return new Proxy(primary, {
     get(target, prop, receiver) {
@@ -192,12 +217,15 @@ function createFailoverConnection(
       const fallbackValue = fallback ? Reflect.get(fallback, prop, fallback) : null;
 
       return async (...args: unknown[]) => {
+        const label = `Connection.${String(prop)}()`;
+        const bucketName = prop === 'sendRawTransaction' ? 'tx:shared' : 'rpc:shared';
         try {
           return await callRpcWithRateLimitRetry(
-            `Connection.${String(prop)}()`,
+            label,
             () => primaryValue.apply(target, args),
             limiter,
             logger,
+            bucketName,
           );
         } catch (error) {
           if (!fallback || typeof fallbackValue !== 'function') {
@@ -209,6 +237,7 @@ function createFailoverConnection(
             () => fallbackValue.apply(fallback, args),
             limiter,
             logger,
+            bucketName,
           );
         }
       };
@@ -261,6 +290,8 @@ export type BotInputConfig = {
   MIN_PRICE?: string | number;
   RPC_REQUESTS_PER_SECOND?: string | number;
   RPC_TX_SEND_RATE_LIMIT_PER_SECOND?: string | number;
+  USE_RPC_LIMITER?: string | number | boolean;
+  useRpcLimiter?: string | number | boolean;
   CHAIN_STATUS_REFRESH_INTERVAL_MINUTES?: string | number;
   CHECK_INTERVAL_MINUTES?: string | number;
   RELEVANT_SELL_ORDER_PCT?: string | number;
@@ -388,6 +419,7 @@ export type BotConfig = {
   minPrice: number;
   rpcRequestsPerSecond: number;
   rpcTxSendRateLimitPerSecond: number;
+  useRpcLimiter: boolean;
   chainStatusRefreshIntervalMinutes: number;
   checkIntervalMinutes: number;
   relevantSellOrderPct: number;
@@ -499,6 +531,7 @@ export const EDITABLE_CONFIG_KEYS = [
   'MIN_PRICE',
   'RPC_REQUESTS_PER_SECOND',
   'RPC_TX_SEND_RATE_LIMIT_PER_SECOND',
+  'USE_RPC_LIMITER',
   'CHAIN_STATUS_REFRESH_INTERVAL_MINUTES',
   'CHECK_INTERVAL_MINUTES',
   'RELEVANT_SELL_ORDER_PCT',
@@ -521,6 +554,7 @@ export function getEditableConfigFromEnv(env: Partial<Record<string, string | un
     MIN_PRICE: env.MIN_PRICE ?? '0.00085',
     RPC_REQUESTS_PER_SECOND: env.RPC_REQUESTS_PER_SECOND ?? String(DEFAULT_RPC_REQUESTS_PER_SECOND),
     RPC_TX_SEND_RATE_LIMIT_PER_SECOND: env.RPC_TX_SEND_RATE_LIMIT_PER_SECOND ?? String(DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND),
+    USE_RPC_LIMITER: env.USE_RPC_LIMITER ?? 'false',
     CHAIN_STATUS_REFRESH_INTERVAL_MINUTES:
       env.CHAIN_STATUS_REFRESH_INTERVAL_MINUTES ?? String(DEFAULT_CHAIN_STATUS_REFRESH_INTERVAL_MINUTES),
     CHECK_INTERVAL_MINUTES: env.CHECK_INTERVAL_MINUTES ?? '30',
@@ -543,6 +577,7 @@ export function buildBotConfig(input: BotInputConfig): BotConfig {
     MIN_PRICE: input.MIN_PRICE as string | undefined,
     RPC_REQUESTS_PER_SECOND: input.RPC_REQUESTS_PER_SECOND as string | undefined,
     RPC_TX_SEND_RATE_LIMIT_PER_SECOND: input.RPC_TX_SEND_RATE_LIMIT_PER_SECOND as string | undefined,
+    USE_RPC_LIMITER: String(input.useRpcLimiter ?? input.USE_RPC_LIMITER ?? ''),
     CHAIN_STATUS_REFRESH_INTERVAL_MINUTES: input.CHAIN_STATUS_REFRESH_INTERVAL_MINUTES as string | undefined,
     CHECK_INTERVAL_MINUTES: input.CHECK_INTERVAL_MINUTES as string | undefined,
     RELEVANT_SELL_ORDER_PCT: input.RELEVANT_SELL_ORDER_PCT as string | undefined,
@@ -560,6 +595,7 @@ export function buildBotConfig(input: BotInputConfig): BotConfig {
     editable.RPC_TX_SEND_RATE_LIMIT_PER_SECOND,
     'RPC_TX_SEND_RATE_LIMIT_PER_SECOND',
   );
+  const useRpcLimiter = parseBoolean(editable.USE_RPC_LIMITER);
   const chainStatusRefreshIntervalMinutes = parsePositiveNumber(
     editable.CHAIN_STATUS_REFRESH_INTERVAL_MINUTES,
     'CHAIN_STATUS_REFRESH_INTERVAL_MINUTES',
@@ -582,6 +618,7 @@ export function buildBotConfig(input: BotInputConfig): BotConfig {
     minPrice,
     rpcRequestsPerSecond,
     rpcTxSendRateLimitPerSecond,
+    useRpcLimiter,
     chainStatusRefreshIntervalMinutes,
     checkIntervalMinutes,
     relevantSellOrderPct,
@@ -620,6 +657,14 @@ function parsePositiveNumber(value: string | number, fieldName: string): number 
   }
 
   return parsed;
+}
+
+function parseBoolean(value: string | number | boolean | null | undefined): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
 }
 
 function parsePositivePercentage(value: string | number, fieldName: string): number {
@@ -1359,6 +1404,7 @@ export class LmMarketBot {
       config.rpcUrlFallback,
       this.logger,
       () => this.config.rpcRequestsPerSecond,
+      () => this.config.useRpcLimiter,
     );
     const provider = new AnchorProvider(this.connection, new Wallet(this.wallet), AnchorProvider.defaultOptions());
     this.sageProgram = new Program(
@@ -1400,6 +1446,7 @@ export class LmMarketBot {
     this.config.minPrice = next.minPrice;
     this.config.rpcRequestsPerSecond = next.rpcRequestsPerSecond;
     this.config.rpcTxSendRateLimitPerSecond = next.rpcTxSendRateLimitPerSecond;
+    this.config.useRpcLimiter = next.useRpcLimiter;
     this.config.chainStatusRefreshIntervalMinutes = next.chainStatusRefreshIntervalMinutes;
     this.config.checkIntervalMinutes = next.checkIntervalMinutes;
     this.config.relevantSellOrderPct = next.relevantSellOrderPct;
