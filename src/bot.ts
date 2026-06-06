@@ -5,6 +5,7 @@ import { CargoType, CARGO_IDL, type CargoIDLProgram } from '@staratlas/cargo';
 import { keypairToAsyncSigner } from '@staratlas/data-source';
 import { GmClientService, Order, OrderSide } from '@staratlas/factory';
 import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
   getExtraAccountMetaAddress,
   getTransferHook,
@@ -2227,12 +2228,38 @@ export class LmMarketBot {
   }
 
   private async signAndSend(transaction: Transaction, extraSigners: Keypair[] = []): Promise<string> {
+    await this.normalizeAssociatedTokenAccountProgramIds(transaction);
     const { signature, blockhash, lastValidBlockHeight } = await this.submitTransactionRateLimited(transaction, extraSigners);
     const confirmation = await this.connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
     if (confirmation.value.err) {
       throw new Error(`Transaction ${signature} failed during confirmation: ${JSON.stringify(confirmation.value.err)}`);
     }
     return signature;
+  }
+
+  private async normalizeAssociatedTokenAccountProgramIds(transaction: Transaction): Promise<void> {
+    for (const instruction of transaction.instructions) {
+      if (!instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) || instruction.keys.length < 6) {
+        continue;
+      }
+
+      const mint = instruction.keys[3]?.pubkey;
+      const tokenProgramKey = instruction.keys[5];
+      if (!mint || !tokenProgramKey?.pubkey.equals(TOKEN_PROGRAM_ID)) {
+        continue;
+      }
+
+      const mintAccount = await this.connection.getAccountInfo(mint, 'confirmed');
+      if (!mintAccount?.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+        continue;
+      }
+
+      instruction.keys[5] = {
+        ...tokenProgramKey,
+        pubkey: TOKEN_2022_PROGRAM_ID,
+      };
+      this.logger.info(`Using Token-2022 ATA create for ${mint.toBase58()}.`);
+    }
   }
 
   private async cancelOrder(order: Order, resource: ResourceConfig, side: AssetRuleSide, cancelledIds: Set<string>): Promise<string> {
