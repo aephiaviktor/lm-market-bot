@@ -2228,7 +2228,7 @@ export class LmMarketBot {
   }
 
   private async signAndSend(transaction: Transaction, extraSigners: Keypair[] = []): Promise<string> {
-    await this.normalizeAssociatedTokenAccountProgramIds(transaction);
+    await this.normalizeAssociatedTokenAccountInstructions(transaction);
     const { signature, blockhash, lastValidBlockHeight } = await this.submitTransactionRateLimited(transaction, extraSigners);
     const confirmation = await this.connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
     if (confirmation.value.err) {
@@ -2237,15 +2237,17 @@ export class LmMarketBot {
     return signature;
   }
 
-  private async normalizeAssociatedTokenAccountProgramIds(transaction: Transaction): Promise<void> {
+  private async normalizeAssociatedTokenAccountInstructions(transaction: Transaction): Promise<void> {
     for (const instruction of transaction.instructions) {
       if (!instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) || instruction.keys.length < 6) {
         continue;
       }
 
+      const ataKey = instruction.keys[1];
+      const owner = instruction.keys[2]?.pubkey;
       const mint = instruction.keys[3]?.pubkey;
       const tokenProgramKey = instruction.keys[5];
-      if (!mint || !tokenProgramKey?.pubkey.equals(TOKEN_PROGRAM_ID)) {
+      if (!ataKey || !owner || !mint || !tokenProgramKey) {
         continue;
       }
 
@@ -2254,11 +2256,34 @@ export class LmMarketBot {
         continue;
       }
 
-      instruction.keys[5] = {
-        ...tokenProgramKey,
-        pubkey: TOKEN_2022_PROGRAM_ID,
-      };
-      this.logger.info(`Using Token-2022 ATA create for ${mint.toBase58()}.`);
+      const expectedAta = await getAssociatedTokenAddress(
+        mint,
+        owner,
+        true,
+        TOKEN_2022_PROGRAM_ID,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      );
+      let changed = false;
+
+      if (!ataKey.pubkey.equals(expectedAta)) {
+        instruction.keys[1] = {
+          ...ataKey,
+          pubkey: expectedAta,
+        };
+        changed = true;
+      }
+
+      if (!tokenProgramKey.pubkey.equals(TOKEN_2022_PROGRAM_ID)) {
+        instruction.keys[5] = {
+          ...tokenProgramKey,
+          pubkey: TOKEN_2022_PROGRAM_ID,
+        };
+        changed = true;
+      }
+
+      if (changed) {
+        this.logger.info(`Using Token-2022 ATA ${expectedAta.toBase58()} for ${mint.toBase58()}.`);
+      }
     }
   }
 
