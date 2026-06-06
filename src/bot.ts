@@ -2364,6 +2364,15 @@ export class LmMarketBot {
       return;
     }
 
+    const tokenProgramKeyIndex = instruction.keys.findIndex((key) => key.pubkey.equals(TOKEN_PROGRAM_ID));
+    if (tokenProgramKeyIndex >= 0) {
+      instruction.keys[tokenProgramKeyIndex] = {
+        ...instruction.keys[tokenProgramKeyIndex],
+        pubkey: TOKEN_2022_PROGRAM_ID,
+      };
+      this.logger.info(`Using Token-2022 token program for ${depositMint.toBase58()} ${actionLabel}.`);
+    }
+
     const mint = unpackMint(depositMint, mintAccount, TOKEN_2022_PROGRAM_ID);
     const transferHook = getTransferHook(mint);
     if (!transferHook) {
