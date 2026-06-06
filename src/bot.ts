@@ -2746,7 +2746,7 @@ export class LmMarketBot {
         );
       }
 
-      if (localMarketContext && walletAvailableQuantity < addableAvailableQuantity) {
+      if (localMarketContext && shouldResizeForAvailableInventory && walletAvailableQuantity < addableAvailableQuantity) {
         const certificateQuantity = addableAvailableQuantity - walletAvailableQuantity;
         this.logger.info(`Minting ${certificateQuantity} ${resource.name} local-market certificates before resizing sell order.`);
         await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
