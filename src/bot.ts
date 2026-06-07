@@ -2289,6 +2289,32 @@ export class LmMarketBot {
 
   private async cancelOrder(order: Order, resource: ResourceConfig, side: AssetRuleSide, cancelledIds: Set<string>): Promise<string> {
     this.logger.info(`Cancelling ${side} order for ${resource.name} ${order.id} at ${order.uiPrice} ATLAS`);
+
+    // The GM trader program does not currently support cancelling Token-2022
+    // (LM certificate) orders — live simulation rejects `processCancel` with
+    // `InvalidTokenAccount` (6004) regardless of which `tokenProgram` we pass.
+    // Skip the transaction entirely so we don't burn fees on doomed retries;
+    // the order will stay open until it is cancelled manually or expires.
+    const depositMintAccount = await this.connection.getAccountInfo(resource.mint, 'confirmed');
+    if (depositMintAccount?.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+      this.logger.warn(
+        `Skipping cancel of ${side} order ${order.id} for ${resource.name}: ` +
+          `GM trader program does not support Token-2022 cancellations. ` +
+          `Order will remain open until cancelled manually or expired.`,
+      );
+      await this.appendLog({
+        event: 'CANCEL_SKIP_UNSUPPORTED_TOKEN_2022',
+        side,
+        resource: resource.name,
+        mint: resource.mint.toBase58(),
+        orderId: order.id,
+        price: order.uiPrice,
+        remaining: order.orderQtyRemaining,
+        message: 'GM trader processCancel rejects Token-2022 deposits with InvalidTokenAccount; skipping cancel.',
+      });
+      return '';
+    }
+
     const { transaction, signers } = await this.gm.getCancelOrderTransaction(
       this.connection,
       new PublicKey(order.id),
