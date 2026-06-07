@@ -2364,14 +2364,10 @@ export class LmMarketBot {
       return;
     }
 
-    const tokenProgramKeyIndex = instruction.keys.findIndex((key) => key.pubkey.equals(TOKEN_PROGRAM_ID));
-    if (tokenProgramKeyIndex >= 0) {
-      instruction.keys[tokenProgramKeyIndex] = {
-        ...instruction.keys[tokenProgramKeyIndex],
-        pubkey: TOKEN_2022_PROGRAM_ID,
-      };
-      this.logger.info(`Using Token-2022 token program for ${depositMint.toBase58()} ${actionLabel}.`);
-    }
+    // Do NOT swap the base `tokenProgram` account slot — the GM trader program
+    // expects the classic SPL Token program there even for Token-2022 deposit
+    // mints. Token-2022 belongs in the remaining-account tail below.
+    // (See v0.1.20 commit 1052c5b; v0.2.25 re-added the swap and broke sells.)
 
     const mint = unpackMint(depositMint, mintAccount, TOKEN_2022_PROGRAM_ID);
     const transferHook = getTransferHook(mint);
