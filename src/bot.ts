@@ -54,19 +54,18 @@ const MARKET_LEADER_CACHE_TTL_MS = 600000;
 const OPEN_ORDERS_CACHE_TTL_MS = 60000;
 const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 120000;
 const STATUS_SNAPSHOT_CACHE_CEIL_MS = 600000;
-const DEFAULT_RPC_REQUESTS_PER_SECOND = 1;
-const MAX_RPC_REQUESTS_PER_SECOND = 1;
+const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
+const MAX_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
 const DEFAULT_CHAIN_STATUS_REFRESH_INTERVAL_MINUTES = 10;
 const STARBASE_PLAYER_PROFILE_OFFSET = 9;
 const STARBASE_PLAYER_STARBASE_OFFSET = 73;
 const CARGO_POD_AUTHORITY_OFFSET = 41;
-const CARGO_POD_TOKEN_CACHE_TTL_MS = 60000;
+const CARGO_POD_TOKEN_CACHE_TTL_MS = 600000;
+const LOCAL_MARKET_SELL_CONTEXT_CACHE_TTL_MS = 600000;
 const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [2000, 5000, 10000];
 const RPC_LIMITER_SLOW_WAIT_LOG_MS = 100;
 const RPC_LIMITER_WAIT_LOG_THROTTLE_MS = 60000;
-const FAILED_ASSET_RETRY_DELAY_MS = 10000;
-const FAILED_ASSET_RETRY_LIMIT = 3;
 const SHIP_BUY_OUTBID_PCT = 0.005;
 const SHIP_PART_SUFFIX = ' (ship parts)';
 const SHIP_START_NAME = 'Busan Pulse';
@@ -373,6 +372,11 @@ type BotState = Record<string, ResourceOrderState>;
 type CargoPodTokenBalanceCacheEntry = {
   expiresAt: number;
   balances: Map<string, number>;
+};
+
+type LocalMarketSellContextCacheEntry = {
+  expiresAt: number;
+  context: LocalMarketSellContext | null;
 };
 
 type LocalMarketSellContext = {
@@ -1400,7 +1404,7 @@ export class LmMarketBot {
   private readonly marketOrderSnapshotCache = new Map<string, MarketOrderSnapshotCacheEntry>();
   private readonly myOpenOrdersCache = new Map<string, MyOpenOrdersCacheEntry>();
   private readonly walletBalanceCache = new Map<string, number>();
-  private readonly localMarketSellContextCache = new Map<string, LocalMarketSellContext | null>();
+  private readonly localMarketSellContextCache = new Map<string, LocalMarketSellContextCacheEntry>();
   private readonly starbasePlayerCache = new Map<string, PublicKey | null>();
   private readonly cargoPodCache = new Map<string, PublicKey[]>();
   private readonly cargoPodTokenBalanceCache = new Map<string, CargoPodTokenBalanceCacheEntry>();
@@ -1408,9 +1412,6 @@ export class LmMarketBot {
   private statusSnapshotCache: { expiresAt: number; snapshot: BotStatusSnapshot } | null = null;
   private transactionSubmissionQueue: Promise<void> = Promise.resolve();
   private nextTransactionSubmitAtMs = 0;
-  private readonly failedAssetRetryTimers = new Map<string, NodeJS.Timeout>();
-  private readonly failedAssetRetryAttempts = new Map<string, number>();
-  private nextFailedAssetRetryAtMs = 0;
 
   constructor(
     private readonly config: BotConfig,
@@ -1540,12 +1541,6 @@ export class LmMarketBot {
       clearTimeout(this.loopTimer);
       this.loopTimer = null;
     }
-    for (const timer of this.failedAssetRetryTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.failedAssetRetryTimers.clear();
-    this.failedAssetRetryAttempts.clear();
-    this.nextFailedAssetRetryAtMs = 0;
   }
 
   async getStatusSnapshot(): Promise<BotStatusSnapshot> {
@@ -1916,15 +1911,16 @@ export class LmMarketBot {
     rawResource: ResourceConfig,
   ): Promise<LocalMarketSellContext | null> {
     const cacheKey = `${rule.starbase}:${rawResource.mint.toBase58()}`;
-    if (this.localMarketSellContextCache.has(cacheKey)) {
-      return this.localMarketSellContextCache.get(cacheKey) ?? null;
+    const cached = this.localMarketSellContextCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.context;
     }
 
     const starbaseEntry = findStarbaseRegistryEntry(rule.starbase);
     const starbasePlayer = await this.getStarbasePlayer(rule.starbase);
     const cargoToken = await this.getStarbaseCargoPodTokenAccount(rule, rawResource);
     if (!starbaseEntry || !starbasePlayer || !cargoToken) {
-      this.localMarketSellContextCache.set(cacheKey, null);
+      this.localMarketSellContextCache.set(cacheKey, this.makeLocalMarketSellContextEntry(null));
       return null;
     }
 
@@ -1957,12 +1953,12 @@ export class LmMarketBot {
       this.logger.warn(
         `OWNER_PROFILE faction account ${profileFaction.toBase58()} is ${owner}; expected ${PROFILE_FACTION_PROGRAM_ID.toBase58()}. Cannot mint local-market certificates.`,
       );
-      this.localMarketSellContextCache.set(cacheKey, null);
+      this.localMarketSellContextCache.set(cacheKey, this.makeLocalMarketSellContextEntry(null));
       return null;
     }
     const profileKeyIndex = await this.resolveOwnerProfileKeyIndex();
     if (profileKeyIndex === null) {
-      this.localMarketSellContextCache.set(cacheKey, null);
+      this.localMarketSellContextCache.set(cacheKey, this.makeLocalMarketSellContextEntry(null));
       return null;
     }
 
@@ -1985,8 +1981,17 @@ export class LmMarketBot {
       profileFaction,
       profileKeyIndex,
     };
-    this.localMarketSellContextCache.set(cacheKey, context);
+    this.localMarketSellContextCache.set(cacheKey, this.makeLocalMarketSellContextEntry(context));
     return context;
+  }
+
+  private makeLocalMarketSellContextEntry(
+    context: LocalMarketSellContext | null,
+  ): LocalMarketSellContextCacheEntry {
+    return {
+      expiresAt: Date.now() + LOCAL_MARKET_SELL_CONTEXT_CACHE_TTL_MS,
+      context,
+    };
   }
 
   private async ensureCertificateMint(context: LocalMarketSellContext): Promise<void> {
@@ -3075,83 +3080,6 @@ export class LmMarketBot {
     }
   }
 
-  private clearFailedAssetRetry(starbase: string, asset: string) {
-    const key = `${normalizeStarbaseName(starbase)}|${asset.toLowerCase()}`;
-    const timer = this.failedAssetRetryTimers.get(key);
-    if (timer) {
-      clearTimeout(timer);
-      this.failedAssetRetryTimers.delete(key);
-    }
-    this.failedAssetRetryAttempts.delete(key);
-  }
-
-  private findCurrentAssetRuleGroup(starbase: string, asset: string): GroupedAssetRules | null {
-    const targetStarbase = normalizeStarbaseName(starbase);
-    const targetAsset = asset.toLowerCase();
-    const groupedRules = groupRulesByAsset(this.config.assetRules);
-    for (const group of groupedRules.values()) {
-      if (group.starbase === targetStarbase && group.asset.toLowerCase() === targetAsset) {
-        return group;
-      }
-    }
-    return null;
-  }
-
-  private scheduleFailedAssetRetry(group: GroupedAssetRules) {
-    const key = `${group.starbase}|${group.asset.toLowerCase()}`;
-    if (this.failedAssetRetryTimers.has(key)) {
-      return;
-    }
-
-    const nextAttempt = (this.failedAssetRetryAttempts.get(key) ?? 0) + 1;
-    if (nextAttempt > FAILED_ASSET_RETRY_LIMIT) {
-      this.logger.error(`Asset ${group.asset} failed after ${FAILED_ASSET_RETRY_LIMIT} short retries; waiting for next full cycle.`);
-      this.failedAssetRetryAttempts.delete(key);
-      return;
-    }
-
-    this.failedAssetRetryAttempts.set(key, nextAttempt);
-    const now = Date.now();
-    const retryDelayMs = Math.max(FAILED_ASSET_RETRY_DELAY_MS, this.nextFailedAssetRetryAtMs - now);
-    this.nextFailedAssetRetryAtMs = now + retryDelayMs + FAILED_ASSET_RETRY_DELAY_MS;
-    this.logger.warn(
-      `Retrying failed asset ${group.asset} in ${retryDelayMs}ms (${nextAttempt}/${FAILED_ASSET_RETRY_LIMIT}).`,
-    );
-
-    const timer = setTimeout(() => {
-      this.failedAssetRetryTimers.delete(key);
-      void this.retryFailedAssetRuleGroup(group.starbase, group.asset);
-    }, retryDelayMs);
-    this.failedAssetRetryTimers.set(key, timer);
-  }
-
-  private async retryFailedAssetRuleGroup(starbase: string, asset: string) {
-    if (!this.running) {
-      return;
-    }
-
-    const group = this.findCurrentAssetRuleGroup(starbase, asset);
-    if (!group) {
-      this.clearFailedAssetRetry(starbase, asset);
-      return;
-    }
-
-    try {
-      await this.processAssetRuleGroup(group);
-      this.clearFailedAssetRetry(starbase, asset);
-      this.logger.info(`Retry succeeded for asset ${group.asset}.`);
-    } catch (err) {
-      this.logger.error(`Retry failed for asset ${group.asset}:`, err);
-      await this.appendLog({
-        event: 'ERROR',
-        asset: group.asset,
-        ruleIndexes: group.rules.map((item) => item.index),
-        message: (err as Error).message,
-      });
-      this.scheduleFailedAssetRetry(group);
-    }
-  }
-
   private async runCycle() {
     this.walletBalanceCache.clear();
     this.solBalanceCache = null;
@@ -3185,10 +3113,8 @@ export class LmMarketBot {
             ruleIndexes: group.rules.map((item) => item.index),
             message: (err as Error).message,
           });
-          this.scheduleFailedAssetRetry(group);
           continue;
         }
-        this.clearFailedAssetRetry(group.starbase, group.asset);
       }
       return;
     }
