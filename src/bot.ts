@@ -50,14 +50,14 @@ const DEFAULT_IRON_ORE_MINT = 'FeorejFjRRAfusN9Fg3WjEZ1dRCf74o6xwT5vDt3R34J';
 const ORDER_PRICE_EPSILON = 0.0000005;
 const ORDER_PRICE_STEP = 0.000001;
 const ORDER_PRICE_NUDGE = 0.00000001;
-const MARKET_LEADER_CACHE_TTL_MS = 300000;
-const OPEN_ORDERS_CACHE_TTL_MS = 30000;
-const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 60000;
-const STATUS_SNAPSHOT_CACHE_CEIL_MS = 300000;
+const MARKET_LEADER_CACHE_TTL_MS = 600000;
+const OPEN_ORDERS_CACHE_TTL_MS = 60000;
+const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 120000;
+const STATUS_SNAPSHOT_CACHE_CEIL_MS = 600000;
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 1;
 const MAX_RPC_REQUESTS_PER_SECOND = 1;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
-const DEFAULT_CHAIN_STATUS_REFRESH_INTERVAL_MINUTES = 5;
+const DEFAULT_CHAIN_STATUS_REFRESH_INTERVAL_MINUTES = 10;
 const STARBASE_PLAYER_PROFILE_OFFSET = 9;
 const STARBASE_PLAYER_STARBASE_OFFSET = 73;
 const CARGO_POD_AUTHORITY_OFFSET = 41;
@@ -1585,8 +1585,13 @@ export class LmMarketBot {
       ruleHealth,
     };
 
+    const configuredTtlMs = this.config.chainStatusRefreshIntervalMinutes * 60_000;
+    const ttlMs = Math.min(
+      STATUS_SNAPSHOT_CACHE_CEIL_MS,
+      Math.max(STATUS_SNAPSHOT_CACHE_FLOOR_MS, configuredTtlMs),
+    );
     this.statusSnapshotCache = {
-      expiresAt: Date.now() + this.config.chainStatusRefreshIntervalMinutes * 60_000,
+      expiresAt: Date.now() + ttlMs,
       snapshot,
     };
 
