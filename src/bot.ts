@@ -2811,11 +2811,7 @@ export class LmMarketBot {
     const shouldResizeForLimit = typeof limit === 'number' && activeQuantity > limit;
     const shouldReplaceForPrice = sortedMyOrders.some((order) => Math.abs(order.uiPrice - targetPrice) >= ORDER_PRICE_EPSILON);
     const shouldConsolidateOrders = sortedMyOrders.length > 1;
-    const canTopUpWithoutCancelling =
-      shouldResizeForAvailableInventory &&
-      !shouldResizeForLimit &&
-      !shouldReplaceForPrice &&
-      !shouldConsolidateOrders;
+    const canTopUpWithoutCancelling = shouldResizeForAvailableInventory && !shouldResizeForLimit;
 
     if (canTopUpWithoutCancelling) {
       const topUpQuantity = addableAvailableQuantity;
@@ -2829,6 +2825,11 @@ export class LmMarketBot {
           ? `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Placing top-up order for ${topUpQuantity} to reach sell limit ${activeQuantity + topUpQuantity}.`
           : `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Placing additional sell order for ${topUpQuantity}.`,
       );
+      if (shouldReplaceForPrice || shouldConsolidateOrders) {
+        this.logger.info(
+          `Leaving existing ${resource.name} sell order(s) unchanged because Token-2022 orders cannot be replaced without a working cancel path.`,
+        );
+      }
 
       if (localMarketContext && walletAvailableQuantity < topUpQuantity) {
         const certificateQuantity = topUpQuantity - walletAvailableQuantity;
