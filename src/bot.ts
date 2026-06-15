@@ -2811,8 +2811,42 @@ export class LmMarketBot {
     const shouldResizeForLimit = typeof limit === 'number' && activeQuantity > limit;
     const shouldReplaceForPrice = sortedMyOrders.some((order) => Math.abs(order.uiPrice - targetPrice) >= ORDER_PRICE_EPSILON);
     const shouldConsolidateOrders = sortedMyOrders.length > 1;
+    const canTopUpWithoutCancelling =
+      shouldResizeForAvailableInventory &&
+      !shouldResizeForLimit &&
+      !shouldReplaceForPrice &&
+      !shouldConsolidateOrders;
 
-    if (shouldResizeForAvailableInventory || shouldResizeForLimit || shouldReplaceForPrice || shouldConsolidateOrders) {
+    if (canTopUpWithoutCancelling) {
+      const topUpQuantity = addableAvailableQuantity;
+      if (topUpQuantity <= 0) {
+        this.logger.info(`No free ${resource.name} sell quantity is available for top-up. Nothing to do.`);
+        return;
+      }
+
+      this.logger.info(
+        canTopUpToSellLimit
+          ? `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Placing top-up order for ${topUpQuantity} to reach sell limit ${activeQuantity + topUpQuantity}.`
+          : `Sell wallet inventory for ${resource.name} is ${freeAvailableQuantity}. Placing additional sell order for ${topUpQuantity}.`,
+      );
+
+      if (localMarketContext && walletAvailableQuantity < topUpQuantity) {
+        const certificateQuantity = topUpQuantity - walletAvailableQuantity;
+        this.logger.info(`Minting ${certificateQuantity} ${resource.name} local-market certificates before top-up sell order.`);
+        await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
+      }
+
+      await this.placeOrder(sellResource, 'sell', targetPrice, topUpQuantity, cancelledIds, quoteMint, sellDepositTokenAccount);
+      const postPlacementBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
+        refresh: true,
+        tokenProgramId: localMarketContext ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
+      });
+      await this.setLastWalletBalance(sellResource, 'sell', postPlacementBalance);
+      this.logger.info(`Stored sell wallet baseline for ${resource.name}: ${postPlacementBalance}`);
+      return;
+    }
+
+    if (shouldResizeForLimit || shouldReplaceForPrice || shouldConsolidateOrders) {
       const nextQuantity = shouldResizeForLimit
         ? limit ?? activeQuantity
         : shouldResizeForAvailableInventory
@@ -2839,15 +2873,42 @@ export class LmMarketBot {
         );
       }
 
+      let skippedCancel = false;
+      for (const order of sortedMyOrders) {
+        const cancelTx = await this.cancelOrder(order, sellResource, 'sell', cancelledIds);
+        if (!cancelTx) {
+          skippedCancel = true;
+        }
+      }
+
+      if (skippedCancel) {
+        this.logger.warn(
+          `Cannot replace ${resource.name} sell order(s): at least one Token-2022 cancel was skipped, ` +
+            `so the existing order quantity is still locked in the market vault.`,
+        );
+        await this.appendLog({
+          event: 'REPLACE_SKIP_UNCANCELLED_TOKEN_2022',
+          side: 'sell',
+          asset: rule?.asset,
+          resource: sellResource.name,
+          mint: sellResource.mint.toBase58(),
+          targetPrice,
+          nextQuantity,
+          activeQuantity,
+          walletAvailableQuantity,
+          freeAvailableQuantity,
+          orderIds: sortedMyOrders.map((order) => order.id),
+          message: 'Skipped replacement because Token-2022 cancel did not release the existing order quantity.',
+        });
+        return;
+      }
+
       if (localMarketContext && shouldResizeForAvailableInventory && walletAvailableQuantity < addableAvailableQuantity) {
         const certificateQuantity = addableAvailableQuantity - walletAvailableQuantity;
         this.logger.info(`Minting ${certificateQuantity} ${resource.name} local-market certificates before resizing sell order.`);
         await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
       }
 
-      for (const order of sortedMyOrders) {
-        await this.cancelOrder(order, sellResource, 'sell', cancelledIds);
-      }
       await this.placeOrder(sellResource, 'sell', targetPrice, nextQuantity, cancelledIds, quoteMint, sellDepositTokenAccount);
       const postPlacementBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
         refresh: true,
