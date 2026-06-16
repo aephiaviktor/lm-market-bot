@@ -55,6 +55,9 @@ const MARKET_LEADER_CACHE_TTL_MS = 600000;
 const OPEN_ORDERS_CACHE_TTL_MS = 60000;
 const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 120000;
 const STATUS_SNAPSHOT_CACHE_CEIL_MS = 600000;
+const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
+const RPC_LATEST_BLOCKHASH_CACHE_TTL_MS = 20000;
+const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
 const MAX_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
@@ -220,6 +223,66 @@ function createFailoverConnection(
   const primary = new Connection(primaryUrl, connectionConfig);
   const fallback = fallbackUrl && fallbackUrl !== primaryUrl ? new Connection(fallbackUrl, connectionConfig) : null;
   const limiter = new RpcRequestRateLimiter(getRequestsPerSecond, logger, useSharedLimiter, 'LM Market Bot', metricsProfile);
+  const rpcReadCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+  const getCacheKey = (method: string, args: unknown[]): string | null => {
+    if (method === 'getLatestBlockhash') {
+      return `${method}:${String(args[0] ?? 'default')}`;
+    }
+    if (method === 'getMinimumBalanceForRentExemption') {
+      return `${method}:${String(args[0] ?? '')}:${String(args[1] ?? 'default')}`;
+    }
+    if (method === 'getAccountInfo' || method === 'getParsedAccountInfo') {
+      const pubkey = args[0] as { toBase58?: () => string; toString?: () => string } | undefined;
+      const pubkeyText = typeof pubkey?.toBase58 === 'function' ? pubkey.toBase58() : pubkey?.toString?.();
+      if (!pubkeyText) {
+        return null;
+      }
+      return `${method}:${pubkeyText}:${String(args[1] ?? 'default')}`;
+    }
+    return null;
+  };
+
+  const readCachedRpcValue = (method: string, args: unknown[]): unknown | undefined => {
+    const key = getCacheKey(method, args);
+    if (!key) {
+      return undefined;
+    }
+    const cached = rpcReadCache.get(key);
+    if (!cached || cached.expiresAt <= Date.now()) {
+      rpcReadCache.delete(key);
+      return undefined;
+    }
+    return cached.value;
+  };
+
+  const writeCachedRpcValue = (method: string, args: unknown[], value: unknown): void => {
+    const key = getCacheKey(method, args);
+    if (!key) {
+      return;
+    }
+
+    let ttlMs = 0;
+    let shouldCache = false;
+    if (method === 'getLatestBlockhash') {
+      ttlMs = RPC_LATEST_BLOCKHASH_CACHE_TTL_MS;
+      shouldCache = value != null;
+    } else if (method === 'getMinimumBalanceForRentExemption') {
+      ttlMs = RPC_RENT_EXEMPTION_CACHE_TTL_MS;
+      shouldCache = typeof value === 'number';
+    } else if (method === 'getAccountInfo') {
+      ttlMs = RPC_ACCOUNT_INFO_CACHE_TTL_MS;
+      shouldCache = value != null;
+    } else if (method === 'getParsedAccountInfo') {
+      const parsed = value as { value?: unknown } | null;
+      ttlMs = RPC_ACCOUNT_INFO_CACHE_TTL_MS;
+      shouldCache = parsed?.value != null;
+    }
+
+    if (shouldCache) {
+      rpcReadCache.set(key, { expiresAt: Date.now() + ttlMs, value });
+    }
+  };
 
   return new Proxy(primary, {
     get(target, prop, receiver) {
@@ -232,10 +295,14 @@ function createFailoverConnection(
 
       return async (...args: unknown[]) => {
         const method = String(prop);
+        const cached = readCachedRpcValue(method, args);
+        if (cached !== undefined) {
+          return cached;
+        }
         const label = `Connection.${String(prop)}()`;
         const bucketName = prop === 'sendRawTransaction' ? 'tx:shared' : 'rpc:shared';
         try {
-          return await callRpcWithRateLimitRetry(
+          const result = await callRpcWithRateLimitRetry(
             label,
             () => primaryValue.apply(target, args),
             limiter,
@@ -243,12 +310,14 @@ function createFailoverConnection(
             bucketName,
             method,
           );
+          writeCachedRpcValue(method, args, result);
+          return result;
         } catch (error) {
           if (!fallback || typeof fallbackValue !== 'function') {
             throw error;
           }
           logger.warn(`Primary RPC failed for Connection.${String(prop)}(), trying fallback RPC.`, error);
-          return await callRpcWithRateLimitRetry(
+          const result = await callRpcWithRateLimitRetry(
             `fallback Connection.${String(prop)}()`,
             () => fallbackValue.apply(fallback, args),
             limiter,
@@ -256,6 +325,8 @@ function createFailoverConnection(
             bucketName,
             method,
           );
+          writeCachedRpcValue(method, args, result);
+          return result;
         }
       };
     },
@@ -2117,12 +2188,10 @@ export class LmMarketBot {
   }
 
   private async saveState() {
-    this.invalidateStatusSnapshotCache();
     await fs.writeFile(this.stateFilePath, JSON.stringify(this.state, null, 2));
   }
 
   private async appendLog(event: Record<string, unknown>) {
-    this.invalidateStatusSnapshotCache();
     const payload = { timestamp: new Date().toISOString(), ...event };
     await fs.appendFile(this.logFilePath, JSON.stringify(payload) + '\n', 'utf8');
   }
@@ -3148,8 +3217,7 @@ export class LmMarketBot {
     const quoteMint = group.group === 'ships' || group.group === 'ship-parts' ? QUOTE_USDC_MINT : getQuoteMintForResource(resource);
     const hasRunnableSellRule = sellRules.length === 1;
     const hasRunnableBuyRule = buyRules.length === 1;
-    const marketOrderSnapshot =
-      hasRunnableSellRule || hasRunnableBuyRule ? await this.readMarketOrderSnapshot(resource) : undefined;
+    const marketOrderSnapshot = hasRunnableBuyRule ? await this.readMarketOrderSnapshot(resource) : undefined;
 
     if (sellRules.length > 1) {
       const ruleIndexes = sellRules.map((item) => item.index);
