@@ -69,7 +69,8 @@ const STATUS_SNAPSHOT_CACHE_CEIL_MS = 600000;
 const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
 const RPC_LATEST_BLOCKHASH_REUSE_MS = 45000;
 const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
-const RPC_METHOD_COUNTER_LOG_INTERVAL_MS = 600000;
+const RPC_METHOD_COUNTER_LOG_INTERVAL_MS = 300000;
+const APP_VERSION = '0.2.37';
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
 const MAX_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
@@ -237,37 +238,69 @@ function createFailoverConnection(
   const limiter = new RpcRequestRateLimiter(getRequestsPerSecond, logger, useSharedLimiter, 'LM Market Bot', metricsProfile);
   const rpcReadCache = new Map<string, { expiresAt: number; value: unknown }>();
   type LatestBlockhashContextResult = RpcResponseAndContext<BlockhashWithExpiryBlockHeight>;
-  type RpcMethodCounter = { network: number; fallback: number; cache: number; joined: number };
+  type RpcCounterField = 'network' | 'fallback' | 'cache' | 'joined';
+  type RpcMethodCounter = Record<RpcCounterField, number>;
   const latestBlockhashCache = new Map<string, { expiresAt: number; result: LatestBlockhashContextResult }>();
   const latestBlockhashInFlight = new Map<string, Promise<LatestBlockhashContextResult>>();
   const rpcMethodCounters = new Map<string, RpcMethodCounter>();
+  const rpcIntervalMethodCounters = new Map<string, RpcMethodCounter>();
+  const rpcCounterStartedAtMs = Date.now();
+  let lastRpcMethodCounterResetAtMs = rpcCounterStartedAtMs;
   let lastRpcMethodCounterLogAtMs = 0;
 
-  const getRpcMethodCounter = (method: string): RpcMethodCounter => {
-    const existing = rpcMethodCounters.get(method);
+  const getRpcMethodCounter = (counters: Map<string, RpcMethodCounter>, method: string): RpcMethodCounter => {
+    const existing = counters.get(method);
     if (existing) {
       return existing;
     }
     const next = { network: 0, fallback: 0, cache: 0, joined: 0 };
-    rpcMethodCounters.set(method, next);
+    counters.set(method, next);
     return next;
   };
 
-  const countRpcMethod = (method: string, field: keyof RpcMethodCounter): void => {
-    getRpcMethodCounter(method)[field] += 1;
+  const formatRpcMethodCounters = (counters: Map<string, RpcMethodCounter>): string[] => {
+    return [...counters.entries()]
+      .filter(([, counter]) => counter.network || counter.fallback || counter.cache || counter.joined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, counter]) => {
+        return `${name}: net=${counter.network}, fallback=${counter.fallback}, cache=${counter.cache}, joined=${counter.joined}`;
+      });
+  };
+
+  const clearRpcMethodCounters = (counters: Map<string, RpcMethodCounter>): void => {
+    for (const counter of counters.values()) {
+      counter.network = 0;
+      counter.fallback = 0;
+      counter.cache = 0;
+      counter.joined = 0;
+    }
+  };
+
+  const logRpcMethodCounters = (now: number): void => {
+    const intervalParts = formatRpcMethodCounters(rpcIntervalMethodCounters);
+    const totalParts = formatRpcMethodCounters(rpcMethodCounters);
+    if (!intervalParts.length && !totalParts.length) {
+      return;
+    }
+    const intervalSeconds = Math.max(1, Math.round((now - lastRpcMethodCounterResetAtMs) / 1000));
+    const uptimeSeconds = Math.max(1, Math.round((now - rpcCounterStartedAtMs) / 1000));
+    logger.info(
+      `RPC method counters v${APP_VERSION} profile=${metricsProfile} pid=${process.pid} ` +
+        `interval=${intervalSeconds}s uptime=${uptimeSeconds}s | interval ${intervalParts.join(' | ')} | total ${totalParts.join(' | ')}`,
+    );
+    clearRpcMethodCounters(rpcIntervalMethodCounters);
+    lastRpcMethodCounterResetAtMs = now;
+  };
+
+  const countRpcMethod = (method: string, field: RpcCounterField): void => {
+    getRpcMethodCounter(rpcMethodCounters, method)[field] += 1;
+    getRpcMethodCounter(rpcIntervalMethodCounters, method)[field] += 1;
     const now = Date.now();
     if (now - lastRpcMethodCounterLogAtMs < RPC_METHOD_COUNTER_LOG_INTERVAL_MS) {
       return;
     }
     lastRpcMethodCounterLogAtMs = now;
-    const parts = [...rpcMethodCounters.entries()]
-      .filter(([, counter]) => counter.network || counter.fallback || counter.cache || counter.joined)
-      .map(([name, counter]) => {
-        return `${name}: network=${counter.network}, fallback=${counter.fallback}, cache=${counter.cache}, joined=${counter.joined}`;
-      });
-    if (parts.length) {
-      logger.info(`RPC method counters (${metricsProfile}): ${parts.join(' | ')}`);
-    }
+    logRpcMethodCounters(now);
   };
 
   const getLatestBlockhashConfig = (arg: unknown): { commitment: Commitment | 'default'; minContextSlot?: number } => {
@@ -308,7 +341,7 @@ function createFailoverConnection(
         'rpc:shared',
         'getLatestBlockhash',
       );
-      countRpcMethod('getLatestBlockhash.rpc', 'network');
+      countRpcMethod('getLatestBlockhash.network', 'network');
       return result;
     } catch (error) {
       if (!fallback) {
@@ -323,7 +356,7 @@ function createFailoverConnection(
         'rpc:shared',
         'getLatestBlockhash',
       );
-      countRpcMethod('getLatestBlockhash.rpc', 'fallback');
+      countRpcMethod('getLatestBlockhash.network', 'fallback');
       return result;
     }
   };
@@ -437,6 +470,7 @@ function createFailoverConnection(
         }
         const cached = readCachedRpcValue(method, args);
         if (cached !== undefined) {
+          countRpcMethod(method, 'cache');
           return cached;
         }
         const label = `Connection.${String(prop)}()`;
@@ -450,6 +484,7 @@ function createFailoverConnection(
             bucketName,
             method,
           );
+          countRpcMethod(method, 'network');
           writeCachedRpcValue(method, args, result);
           return result;
         } catch (error) {
@@ -465,6 +500,7 @@ function createFailoverConnection(
             bucketName,
             method,
           );
+          countRpcMethod(method, 'fallback');
           writeCachedRpcValue(method, args, result);
           return result;
         }
