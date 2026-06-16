@@ -1,5 +1,16 @@
 import { Buffer } from 'buffer';
-import { Connection, Keypair, PublicKey, SendTransactionError, Transaction, TransactionInstruction } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SendTransactionError,
+  Transaction,
+  TransactionInstruction,
+  type BlockhashWithExpiryBlockHeight,
+  type Commitment,
+  type GetLatestBlockhashConfig,
+  type RpcResponseAndContext,
+} from '@solana/web3.js';
 import { AnchorProvider, BN, Program, Wallet } from '@staratlas/anchor';
 import { CargoType, CARGO_IDL, type CargoIDLProgram } from '@staratlas/cargo';
 import { keypairToAsyncSigner } from '@staratlas/data-source';
@@ -56,8 +67,9 @@ const OPEN_ORDERS_CACHE_TTL_MS = 60000;
 const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 120000;
 const STATUS_SNAPSHOT_CACHE_CEIL_MS = 600000;
 const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
-const RPC_LATEST_BLOCKHASH_CACHE_TTL_MS = 20000;
+const RPC_LATEST_BLOCKHASH_REUSE_MS = 45000;
 const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
+const RPC_METHOD_COUNTER_LOG_INTERVAL_MS = 600000;
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
 const MAX_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
@@ -224,11 +236,139 @@ function createFailoverConnection(
   const fallback = fallbackUrl && fallbackUrl !== primaryUrl ? new Connection(fallbackUrl, connectionConfig) : null;
   const limiter = new RpcRequestRateLimiter(getRequestsPerSecond, logger, useSharedLimiter, 'LM Market Bot', metricsProfile);
   const rpcReadCache = new Map<string, { expiresAt: number; value: unknown }>();
+  type LatestBlockhashContextResult = RpcResponseAndContext<BlockhashWithExpiryBlockHeight>;
+  type RpcMethodCounter = { network: number; fallback: number; cache: number; joined: number };
+  const latestBlockhashCache = new Map<string, { expiresAt: number; result: LatestBlockhashContextResult }>();
+  const latestBlockhashInFlight = new Map<string, Promise<LatestBlockhashContextResult>>();
+  const rpcMethodCounters = new Map<string, RpcMethodCounter>();
+  let lastRpcMethodCounterLogAtMs = 0;
+
+  const getRpcMethodCounter = (method: string): RpcMethodCounter => {
+    const existing = rpcMethodCounters.get(method);
+    if (existing) {
+      return existing;
+    }
+    const next = { network: 0, fallback: 0, cache: 0, joined: 0 };
+    rpcMethodCounters.set(method, next);
+    return next;
+  };
+
+  const countRpcMethod = (method: string, field: keyof RpcMethodCounter): void => {
+    getRpcMethodCounter(method)[field] += 1;
+    const now = Date.now();
+    if (now - lastRpcMethodCounterLogAtMs < RPC_METHOD_COUNTER_LOG_INTERVAL_MS) {
+      return;
+    }
+    lastRpcMethodCounterLogAtMs = now;
+    const parts = [...rpcMethodCounters.entries()]
+      .filter(([, counter]) => counter.network || counter.fallback || counter.cache || counter.joined)
+      .map(([name, counter]) => {
+        return `${name}: network=${counter.network}, fallback=${counter.fallback}, cache=${counter.cache}, joined=${counter.joined}`;
+      });
+    if (parts.length) {
+      logger.info(`RPC method counters (${metricsProfile}): ${parts.join(' | ')}`);
+    }
+  };
+
+  const getLatestBlockhashConfig = (arg: unknown): { commitment: Commitment | 'default'; minContextSlot?: number } => {
+    if (typeof arg === 'string') {
+      return { commitment: arg as Commitment };
+    }
+    if (arg && typeof arg === 'object') {
+      const config = arg as GetLatestBlockhashConfig;
+      return {
+        commitment: config.commitment ?? 'default',
+        minContextSlot: typeof config.minContextSlot === 'number' ? config.minContextSlot : undefined,
+      };
+    }
+    return { commitment: 'default' };
+  };
+
+  const getLatestBlockhashCacheKey = (args: unknown[]): string => {
+    const config = getLatestBlockhashConfig(args[0]);
+    return `commitment:${String(config.commitment)}`;
+  };
+
+  const isLatestBlockhashUsable = (cached: { expiresAt: number; result: LatestBlockhashContextResult }, args: unknown[]): boolean => {
+    if (cached.expiresAt <= Date.now()) {
+      return false;
+    }
+    const minContextSlot = getLatestBlockhashConfig(args[0]).minContextSlot;
+    return minContextSlot === undefined || cached.result.context.slot >= minContextSlot;
+  };
+
+  const fetchLatestBlockhashContext = async (args: unknown[]): Promise<LatestBlockhashContextResult> => {
+    const label = 'Connection.getLatestBlockhashAndContext()';
+    try {
+      const result = await callRpcWithRateLimitRetry(
+        label,
+        () => primary.getLatestBlockhashAndContext(args[0] as Commitment | GetLatestBlockhashConfig | undefined),
+        limiter,
+        logger,
+        'rpc:shared',
+        'getLatestBlockhash',
+      );
+      countRpcMethod('getLatestBlockhash.rpc', 'network');
+      return result;
+    } catch (error) {
+      if (!fallback) {
+        throw error;
+      }
+      logger.warn('Primary RPC failed for Connection.getLatestBlockhashAndContext(), trying fallback RPC.', error);
+      const result = await callRpcWithRateLimitRetry(
+        'fallback Connection.getLatestBlockhashAndContext()',
+        () => fallback.getLatestBlockhashAndContext(args[0] as Commitment | GetLatestBlockhashConfig | undefined),
+        limiter,
+        logger,
+        'rpc:shared',
+        'getLatestBlockhash',
+      );
+      countRpcMethod('getLatestBlockhash.rpc', 'fallback');
+      return result;
+    }
+  };
+
+  const readLatestBlockhash = async (
+    method: 'getLatestBlockhash' | 'getLatestBlockhashAndContext',
+    args: unknown[],
+  ): Promise<BlockhashWithExpiryBlockHeight | LatestBlockhashContextResult> => {
+    const selectResult = (result: LatestBlockhashContextResult): BlockhashWithExpiryBlockHeight | LatestBlockhashContextResult => {
+      return method === 'getLatestBlockhash' ? result.value : result;
+    };
+    const key = getLatestBlockhashCacheKey(args);
+    const cached = latestBlockhashCache.get(key);
+    if (cached && isLatestBlockhashUsable(cached, args)) {
+      countRpcMethod(method, 'cache');
+      return selectResult(cached.result);
+    }
+    if (cached) {
+      latestBlockhashCache.delete(key);
+    }
+
+    const existing = latestBlockhashInFlight.get(key);
+    if (existing) {
+      countRpcMethod(method, 'joined');
+      const result = await existing;
+      if (!isLatestBlockhashUsable({ expiresAt: Date.now() + RPC_LATEST_BLOCKHASH_REUSE_MS, result }, args)) {
+        return await readLatestBlockhash(method, args);
+      }
+      return selectResult(result);
+    }
+
+    const next = fetchLatestBlockhashContext(args)
+      .then((result) => {
+        latestBlockhashCache.set(key, { expiresAt: Date.now() + RPC_LATEST_BLOCKHASH_REUSE_MS, result });
+        return result;
+      })
+      .finally(() => {
+        latestBlockhashInFlight.delete(key);
+      });
+    latestBlockhashInFlight.set(key, next);
+    const result = await next;
+    return selectResult(result);
+  };
 
   const getCacheKey = (method: string, args: unknown[]): string | null => {
-    if (method === 'getLatestBlockhash') {
-      return `${method}:${String(args[0] ?? 'default')}`;
-    }
     if (method === 'getMinimumBalanceForRentExemption') {
       return `${method}:${String(args[0] ?? '')}:${String(args[1] ?? 'default')}`;
     }
@@ -264,10 +404,7 @@ function createFailoverConnection(
 
     let ttlMs = 0;
     let shouldCache = false;
-    if (method === 'getLatestBlockhash') {
-      ttlMs = RPC_LATEST_BLOCKHASH_CACHE_TTL_MS;
-      shouldCache = value != null;
-    } else if (method === 'getMinimumBalanceForRentExemption') {
+    if (method === 'getMinimumBalanceForRentExemption') {
       ttlMs = RPC_RENT_EXEMPTION_CACHE_TTL_MS;
       shouldCache = typeof value === 'number';
     } else if (method === 'getAccountInfo') {
@@ -295,6 +432,9 @@ function createFailoverConnection(
 
       return async (...args: unknown[]) => {
         const method = String(prop);
+        if (method === 'getLatestBlockhash' || method === 'getLatestBlockhashAndContext') {
+          return await readLatestBlockhash(method, args);
+        }
         const cached = readCachedRpcValue(method, args);
         if (cached !== undefined) {
           return cached;
