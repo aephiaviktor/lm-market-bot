@@ -94,29 +94,29 @@ class RpcRequestRateLimiter {
   ) {}
 
   async wait(label: string, bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared', method: string = label): Promise<void> {
-    if (this.useSharedLimiter()) {
-      const sharedStartedAt = Date.now();
-      const waitOptions = {
-        label,
-        metrics: {
-          app: this.metricsApp,
-          profile: this.metricsProfile,
-          method,
-        },
-      };
-      await this.sharedLimiter.wait(bucketName, waitOptions);
-      const sharedWaitMs = Date.now() - sharedStartedAt;
-      const logKey = `${bucketName}:${label}`;
-      const lastLoggedAt = this.lastSharedWaitLogAtMs.get(logKey) ?? 0;
-      const now = Date.now();
-      if (sharedWaitMs > RPC_LIMITER_SLOW_WAIT_LOG_MS && now - lastLoggedAt >= RPC_LIMITER_WAIT_LOG_THROTTLE_MS) {
-        const prefix = bucketName === 'tx:shared' ? 'TX limiter' : 'RPC limiter';
-        this.logger.info(`${prefix} waiting for ${label}.`);
-        this.lastSharedWaitLogAtMs.set(logKey, now);
-      }
-    }
-
     const next = this.queue.then(async () => {
+      if (this.useSharedLimiter()) {
+        const sharedStartedAt = Date.now();
+        const waitOptions = {
+          label,
+          metrics: {
+            app: this.metricsApp,
+            profile: this.metricsProfile,
+            method,
+          },
+        };
+        await this.sharedLimiter.wait(bucketName, waitOptions);
+        const sharedWaitMs = Date.now() - sharedStartedAt;
+        const logKey = `${bucketName}:${label}`;
+        const lastLoggedAt = this.lastSharedWaitLogAtMs.get(logKey) ?? 0;
+        const now = Date.now();
+        if (sharedWaitMs > RPC_LIMITER_SLOW_WAIT_LOG_MS && now - lastLoggedAt >= RPC_LIMITER_WAIT_LOG_THROTTLE_MS) {
+          const prefix = bucketName === 'tx:shared' ? 'TX limiter' : 'RPC limiter';
+          this.logger.info(`${prefix} waiting for ${label}.`);
+          this.lastSharedWaitLogAtMs.set(logKey, now);
+        }
+      }
+
       const requestsPerSecond = Math.max(0.000001, this.getRequestsPerSecond());
       const waitMs = Math.max(0, this.nextRequestAtMs - Date.now());
       if (waitMs > 0) {
@@ -2877,7 +2877,7 @@ export class LmMarketBot {
       );
       if (shouldReplaceForPrice || shouldConsolidateOrders) {
         this.logger.info(
-          `Leaving existing ${resource.name} sell order(s) unchanged because Token-2022 orders cannot be replaced without a working cancel path.`,
+          `Leaving existing ${resource.name} sell order(s) unchanged this cycle and placing an additive top-up order.`,
         );
       }
 
