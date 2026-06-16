@@ -1,5 +1,5 @@
 import { Buffer } from 'buffer';
-import { Connection, Keypair, PublicKey, SendTransactionError, Transaction } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SendTransactionError, Transaction, TransactionInstruction } from '@solana/web3.js';
 import { AnchorProvider, BN, Program, Wallet } from '@staratlas/anchor';
 import { CargoType, CARGO_IDL, type CargoIDLProgram } from '@staratlas/cargo';
 import { keypairToAsyncSigner } from '@staratlas/data-source';
@@ -37,6 +37,7 @@ import {
 import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './starbase-registry';
 
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
+const COMPUTE_BUDGET_PROGRAM_ID = new PublicKey('ComputeBudget111111111111111111111111111111');
 const SAGE_PROGRAM_ID = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7EE');
 const PLAYER_PROFILE_PROGRAM_ID = new PublicKey('pprofELXjL5Kck7Jn5hCpwAL82DpTkSYBENzahVtbc9');
 const CARGO_PROGRAM_ID = new PublicKey('Cargo2VNTPPTi9c1vq1Jw5d3BWUNr18MjRtSupAghKEk');
@@ -2300,30 +2301,8 @@ export class LmMarketBot {
   private async cancelOrder(order: Order, resource: ResourceConfig, side: AssetRuleSide, cancelledIds: Set<string>): Promise<string> {
     this.logger.info(`Cancelling ${side} order for ${resource.name} ${order.id} at ${order.uiPrice} ATLAS`);
 
-    // The GM trader program does not currently support cancelling Token-2022
-    // (LM certificate) orders — live simulation rejects `processCancel` with
-    // `InvalidTokenAccount` (6004) regardless of which `tokenProgram` we pass.
-    // Skip the transaction entirely so we don't burn fees on doomed retries;
-    // the order will stay open until it is cancelled manually or expires.
     const depositMintAccount = await this.connection.getAccountInfo(resource.mint, 'confirmed');
-    if (depositMintAccount?.owner.equals(TOKEN_2022_PROGRAM_ID)) {
-      this.logger.warn(
-        `Skipping cancel of ${side} order ${order.id} for ${resource.name}: ` +
-          `GM trader program does not support Token-2022 cancellations. ` +
-          `Order will remain open until cancelled manually or expired.`,
-      );
-      await this.appendLog({
-        event: 'CANCEL_SKIP_UNSUPPORTED_TOKEN_2022',
-        side,
-        resource: resource.name,
-        mint: resource.mint.toBase58(),
-        orderId: order.id,
-        price: order.uiPrice,
-        remaining: order.orderQtyRemaining,
-        message: 'GM trader processCancel rejects Token-2022 deposits with InvalidTokenAccount; skipping cancel.',
-      });
-      return '';
-    }
+    const isToken2022SellCancel = side === 'sell' && depositMintAccount?.owner.equals(TOKEN_2022_PROGRAM_ID);
 
     const { transaction, signers } = await this.gm.getCancelOrderTransaction(
       this.connection,
@@ -2332,11 +2311,35 @@ export class LmMarketBot {
       GM_PROGRAM_ID,
     );
     const cancelInstruction = transaction.instructions[transaction.instructions.length - 1];
-    await this.addToken2022TransferHookAccountsForGmInstruction(
-      resource.mint,
-      cancelInstruction,
-      'cancel',
-    );
+
+    if (isToken2022SellCancel) {
+      const initializerDepositTokenAccount = await getAssociatedTokenAddress(
+        resource.mint,
+        this.wallet.publicKey,
+        false,
+        TOKEN_2022_PROGRAM_ID,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      );
+      this.insertInstructionAfterComputeBudget(
+        transaction,
+        createAssociatedTokenAccountIdempotentInstruction(
+          this.wallet.publicKey,
+          initializerDepositTokenAccount,
+          this.wallet.publicKey,
+          resource.mint,
+          TOKEN_2022_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID,
+        ),
+      );
+      await this.addToken2022TransferHookAccountsForGmCancel(resource.mint, cancelInstruction);
+    } else {
+      const cancelDepositMint = side === 'sell' ? resource.mint : getQuoteMintForResource(resource);
+      await this.addToken2022TransferHookAccountsForGmInstruction(
+        cancelDepositMint,
+        cancelInstruction,
+        'cancel',
+      );
+    }
     const sig = await this.signAndSend(transaction, signers);
 
     this.invalidateMarketLeaderCacheForMint(resource.mint.toBase58());
@@ -2354,6 +2357,11 @@ export class LmMarketBot {
       remaining: order.orderQtyRemaining,
     });
     return sig;
+  }
+
+  private insertInstructionAfterComputeBudget(transaction: Transaction, instruction: TransactionInstruction): void {
+    const insertAt = transaction.instructions.findIndex((candidate) => !candidate.programId.equals(COMPUTE_BUDGET_PROGRAM_ID));
+    transaction.instructions.splice(insertAt >= 0 ? insertAt : transaction.instructions.length, 0, instruction);
   }
 
   private async getInitializeSellOrderTransaction(
@@ -2429,6 +2437,48 @@ export class LmMarketBot {
     if (addedKeyCount > 0) {
       this.logger.info(
         `Added ${addedKeyCount} Token-2022 transfer-hook account(s) for ${depositMint.toBase58()} ${actionLabel}.`,
+      );
+    }
+  }
+
+  private async addToken2022TransferHookAccountsForGmCancel(
+    depositMint: PublicKey,
+    instruction: Transaction['instructions'][number],
+  ): Promise<void> {
+    const mintAccount = await this.connection.getAccountInfo(depositMint, 'confirmed');
+    if (!mintAccount || !mintAccount.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+      return;
+    }
+
+    const mint = unpackMint(depositMint, mintAccount, TOKEN_2022_PROGRAM_ID);
+    const transferHook = getTransferHook(mint);
+    if (!transferHook) {
+      return;
+    }
+
+    const beforeTokenProgramRemoval = instruction.keys.length;
+    instruction.keys = instruction.keys.filter((key) => !key.pubkey.equals(TOKEN_PROGRAM_ID));
+    const removedClassicTokenProgram = beforeTokenProgramRemoval - instruction.keys.length;
+
+    const keyCountBefore = instruction.keys.length;
+    const extraAccountMetaList = await getExtraAccountMetaAddress(depositMint, transferHook.programId);
+
+    for (const pubkey of [
+      extraAccountMetaList,
+      transferHook.programId,
+      TOKEN_2022_PROGRAM_ID,
+      new PublicKey('Sysvar1nstructions1111111111111111111111111'),
+    ]) {
+      if (!instruction.keys.some((key) => key.pubkey.equals(pubkey))) {
+        instruction.keys.push({ pubkey, isSigner: false, isWritable: false });
+      }
+    }
+
+    const addedKeyCount = instruction.keys.length - keyCountBefore;
+    if (removedClassicTokenProgram > 0 || addedKeyCount > 0) {
+      this.logger.info(
+        `Prepared Token-2022 transfer-hook accounts for ${depositMint.toBase58()} cancel ` +
+          `(removed ${removedClassicTokenProgram} classic token program account(s), added ${addedKeyCount} account(s)).`,
       );
     }
   }
