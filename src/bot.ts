@@ -70,7 +70,7 @@ const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
 const RPC_LATEST_BLOCKHASH_REUSE_MS = 45000;
 const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
 const RPC_METHOD_COUNTER_LOG_INTERVAL_MS = 300000;
-const APP_VERSION = '0.2.37';
+const APP_VERSION = '0.2.38';
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
 const MAX_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
@@ -231,6 +231,7 @@ function createFailoverConnection(
   getRequestsPerSecond: () => number,
   useSharedLimiter: () => boolean,
   metricsProfile: string,
+  recordRpcMethodCounters?: (snapshot: RpcMethodCounterSnapshot) => void,
 ): Connection {
   const connectionConfig = { commitment: 'confirmed' as const, disableRetryOnRateLimit: true };
   const primary = new Connection(primaryUrl, connectionConfig);
@@ -238,8 +239,6 @@ function createFailoverConnection(
   const limiter = new RpcRequestRateLimiter(getRequestsPerSecond, logger, useSharedLimiter, 'LM Market Bot', metricsProfile);
   const rpcReadCache = new Map<string, { expiresAt: number; value: unknown }>();
   type LatestBlockhashContextResult = RpcResponseAndContext<BlockhashWithExpiryBlockHeight>;
-  type RpcCounterField = 'network' | 'fallback' | 'cache' | 'joined';
-  type RpcMethodCounter = Record<RpcCounterField, number>;
   const latestBlockhashCache = new Map<string, { expiresAt: number; result: LatestBlockhashContextResult }>();
   const latestBlockhashInFlight = new Map<string, Promise<LatestBlockhashContextResult>>();
   const rpcMethodCounters = new Map<string, RpcMethodCounter>();
@@ -267,6 +266,23 @@ function createFailoverConnection(
       });
   };
 
+  const snapshotRpcMethodCounters = (counters: Map<string, RpcMethodCounter>): Record<string, RpcMethodCounter> => {
+    return Object.fromEntries(
+      [...counters.entries()]
+        .filter(([, counter]) => counter.network || counter.fallback || counter.cache || counter.joined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, counter]) => [
+          name,
+          {
+            network: counter.network,
+            fallback: counter.fallback,
+            cache: counter.cache,
+            joined: counter.joined,
+          },
+        ]),
+    );
+  };
+
   const clearRpcMethodCounters = (counters: Map<string, RpcMethodCounter>): void => {
     for (const counter of counters.values()) {
       counter.network = 0;
@@ -284,10 +300,21 @@ function createFailoverConnection(
     }
     const intervalSeconds = Math.max(1, Math.round((now - lastRpcMethodCounterResetAtMs) / 1000));
     const uptimeSeconds = Math.max(1, Math.round((now - rpcCounterStartedAtMs) / 1000));
+    const snapshot: RpcMethodCounterSnapshot = {
+      version: APP_VERSION,
+      profile: metricsProfile,
+      pid: process.pid,
+      timestamp: new Date(now).toISOString(),
+      intervalSeconds,
+      uptimeSeconds,
+      interval: snapshotRpcMethodCounters(rpcIntervalMethodCounters),
+      total: snapshotRpcMethodCounters(rpcMethodCounters),
+    };
     logger.info(
       `RPC method counters v${APP_VERSION} profile=${metricsProfile} pid=${process.pid} ` +
         `interval=${intervalSeconds}s uptime=${uptimeSeconds}s | interval ${intervalParts.join(' | ')} | total ${totalParts.join(' | ')}`,
     );
+    recordRpcMethodCounters?.(snapshot);
     clearRpcMethodCounters(rpcIntervalMethodCounters);
     lastRpcMethodCounterResetAtMs = now;
   };
@@ -703,6 +730,19 @@ export type BotLogger = {
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
+};
+
+type RpcCounterField = 'network' | 'fallback' | 'cache' | 'joined';
+type RpcMethodCounter = Record<RpcCounterField, number>;
+type RpcMethodCounterSnapshot = {
+  version: string;
+  profile: string;
+  pid: number;
+  timestamp: string;
+  intervalSeconds: number;
+  uptimeSeconds: number;
+  interval: Record<string, RpcMethodCounter>;
+  total: Record<string, RpcMethodCounter>;
 };
 
 export type BotOpenOrderStatus = {
@@ -1637,6 +1677,7 @@ export class LmMarketBot {
   private readonly analysisPath: string;
   private readonly logFilePath: string;
   private readonly stateFilePath: string;
+  private readonly rpcCounterFilePath: string;
   private checkIntervalMs: number;
 
   private state: BotState = {};
@@ -1667,6 +1708,10 @@ export class LmMarketBot {
   ) {
     const secretKeyBytes = decodeSecret(config.hotWalletSecret);
     this.wallet = secretKeyBytes.length === 32 ? Keypair.fromSeed(secretKeyBytes) : Keypair.fromSecretKey(secretKeyBytes);
+    this.analysisPath = path.resolve(process.cwd(), config.analysisDir);
+    this.logFilePath = path.join(this.analysisPath, 'orders-log.jsonl');
+    this.stateFilePath = path.join(this.analysisPath, 'bot-state.json');
+    this.rpcCounterFilePath = path.join(this.analysisPath, 'rpc-method-counters.jsonl');
     this.connection = createFailoverConnection(
       config.rpcUrl,
       config.rpcUrlFallback,
@@ -1674,6 +1719,9 @@ export class LmMarketBot {
       () => this.config.rpcRequestsPerSecond,
       () => this.config.useRpcLimiter,
       this.config.faction,
+      (snapshot) => {
+        void this.appendRpcCounterSnapshot(snapshot);
+      },
     );
     const provider = new AnchorProvider(this.connection, new Wallet(this.wallet), AnchorProvider.defaultOptions());
     this.sageProgram = new Program(
@@ -1700,9 +1748,6 @@ export class LmMarketBot {
     this.legacyResources = [];
     this.trackedResources = parseRuleResources(config.assetRules);
     this.statusResources = this.trackedResources;
-    this.analysisPath = path.resolve(process.cwd(), config.analysisDir);
-    this.logFilePath = path.join(this.analysisPath, 'orders-log.jsonl');
-    this.stateFilePath = path.join(this.analysisPath, 'bot-state.json');
     this.checkIntervalMs = config.checkIntervalMinutes * 60 * 1000;
   }
 
@@ -2340,6 +2385,21 @@ export class LmMarketBot {
       await fs.access(this.stateFilePath);
     } catch {
       await fs.writeFile(this.stateFilePath, JSON.stringify({}, null, 2));
+    }
+
+    try {
+      await fs.access(this.rpcCounterFilePath);
+    } catch {
+      await fs.writeFile(this.rpcCounterFilePath, '', 'utf8');
+    }
+  }
+
+  private async appendRpcCounterSnapshot(snapshot: RpcMethodCounterSnapshot): Promise<void> {
+    try {
+      await fs.mkdir(this.analysisPath, { recursive: true });
+      await fs.appendFile(this.rpcCounterFilePath, `${JSON.stringify(snapshot)}\n`, 'utf8');
+    } catch (err) {
+      this.logger.warn('Failed to write RPC method counter snapshot:', err);
     }
   }
 
