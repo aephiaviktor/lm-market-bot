@@ -70,7 +70,7 @@ const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
 const RPC_LATEST_BLOCKHASH_REUSE_MS = 45000;
 const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
 const RPC_METHOD_COUNTER_LOG_INTERVAL_MS = 300000;
-const APP_VERSION = '0.2.38';
+const APP_VERSION = '0.2.39';
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
 const MAX_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
@@ -78,6 +78,10 @@ const DEFAULT_CHAIN_STATUS_REFRESH_INTERVAL_MINUTES = 10;
 const STARBASE_PLAYER_PROFILE_OFFSET = 9;
 const STARBASE_PLAYER_STARBASE_OFFSET = 73;
 const CARGO_POD_AUTHORITY_OFFSET = 41;
+const SOL_BALANCE_CACHE_TTL_MS = 120000;
+const WALLET_TOKEN_BALANCE_CACHE_TTL_MS = 120000;
+const STARBASE_PLAYER_CACHE_TTL_MS = 3600000;
+const CARGO_POD_LIST_CACHE_TTL_MS = 3600000;
 const CARGO_POD_TOKEN_CACHE_TTL_MS = 600000;
 const LOCAL_MARKET_SELL_CONTEXT_CACHE_TTL_MS = 600000;
 const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [2000, 5000, 10000];
@@ -646,7 +650,17 @@ type BotState = Record<string, ResourceOrderState>;
 
 type CargoPodTokenBalanceCacheEntry = {
   expiresAt: number;
-  balances: Map<string, number>;
+  promise: Promise<Map<string, number>>;
+};
+
+type CargoPodTokenAccountCacheEntry = {
+  expiresAt: number;
+  promise: Promise<{ cargoPod: PublicKey; tokenAccount: PublicKey; balance: number } | null>;
+};
+
+type ExpiringPromiseCacheEntry<T> = {
+  expiresAt: number;
+  promise: Promise<T>;
 };
 
 type LocalMarketSellContextCacheEntry = {
@@ -1692,12 +1706,13 @@ export class LmMarketBot {
   private readonly marketLeaderCache = new Map<string, { expiresAt: number; bestBuyPrice: number | null; bestSellPrice: number | null }>();
   private readonly marketOrderSnapshotCache = new Map<string, MarketOrderSnapshotCacheEntry>();
   private readonly myOpenOrdersCache = new Map<string, MyOpenOrdersCacheEntry>();
-  private readonly walletBalanceCache = new Map<string, number>();
+  private readonly walletBalanceCache = new Map<string, ExpiringPromiseCacheEntry<number>>();
   private readonly localMarketSellContextCache = new Map<string, LocalMarketSellContextCacheEntry>();
-  private readonly starbasePlayerCache = new Map<string, PublicKey | null>();
-  private readonly cargoPodCache = new Map<string, PublicKey[]>();
+  private readonly starbasePlayerCache = new Map<string, ExpiringPromiseCacheEntry<PublicKey | null>>();
+  private readonly cargoPodCache = new Map<string, ExpiringPromiseCacheEntry<PublicKey[]>>();
   private readonly cargoPodTokenBalanceCache = new Map<string, CargoPodTokenBalanceCacheEntry>();
-  private solBalanceCache: number | null = null;
+  private readonly cargoPodTokenAccountCache = new Map<string, CargoPodTokenAccountCacheEntry>();
+  private solBalanceCache: ExpiringPromiseCacheEntry<number> | null = null;
   private statusSnapshotCache: { expiresAt: number; snapshot: BotStatusSnapshot } | null = null;
   private transactionSubmissionQueue: Promise<void> = Promise.resolve();
   private nextTransactionSubmitAtMs = 0;
@@ -1843,9 +1858,9 @@ export class LmMarketBot {
 
     const wallet = this.wallet.publicKey.toBase58();
 
-    const solBalance = await this.getSolBalance({ refresh: true });
-    const atlasBalance = await this.getWalletBalanceForMint(QUOTE_ATLAS_MINT, 'ATLAS', { refresh: true });
-    const usdcBalance = await this.getWalletBalanceForMint(QUOTE_USDC_MINT, 'USDC', { refresh: true });
+    const solBalance = await this.getSolBalance();
+    const atlasBalance = await this.getWalletBalanceForMint(QUOTE_ATLAS_MINT, 'ATLAS');
+    const usdcBalance = await this.getWalletBalanceForMint(QUOTE_USDC_MINT, 'USDC');
 
     const inventory = await this.buildInventorySnapshot();
     const certificates = await this.buildCertificateSnapshot();
@@ -2002,7 +2017,6 @@ export class LmMarketBot {
         certificateMint,
         certificateTokenAccount: context.certificateTokenAccount.toBase58(),
         balance: await this.getWalletBalanceForMint(context.certificateMint, rawResource.name, {
-          refresh: true,
           tokenProgramId: TOKEN_2022_PROGRAM_ID,
         }),
       });
@@ -2041,25 +2055,53 @@ export class LmMarketBot {
     const mintKey = resource.mint.toBase58();
 
     for (const cargoPod of cargoPods) {
-      try {
-        const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
-        for (const tokenAccount of tokenAccounts.value) {
-          const parsed = tokenAccount.account.data.parsed as {
-            info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
-          };
-          if (parsed.info?.mint !== mintKey) {
-            continue;
-          }
-
-          return {
-            cargoPod,
-            tokenAccount: tokenAccount.pubkey,
-            balance: parseTokenAmount(parsed.info.tokenAmount),
-          };
+      const cacheKey = `${cargoPod.toBase58()}:${mintKey}`;
+      const cached = this.cargoPodTokenAccountCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        const account = await cached.promise;
+        if (account) {
+          return account;
         }
-      } catch (err) {
-        this.logger.warn(`Failed to fetch cargo pod token account for ${cargoPod.toBase58()}`, err);
+        continue;
       }
+
+      const promise = this.readCargoPodTokenAccount(cargoPod, mintKey);
+      this.cargoPodTokenAccountCache.set(cacheKey, {
+        expiresAt: Date.now() + CARGO_POD_TOKEN_CACHE_TTL_MS,
+        promise,
+      });
+
+      const account = await promise;
+      if (account) {
+        return account;
+      }
+    }
+
+    return null;
+  }
+
+  private async readCargoPodTokenAccount(
+    cargoPod: PublicKey,
+    mintKey: string,
+  ): Promise<{ cargoPod: PublicKey; tokenAccount: PublicKey; balance: number } | null> {
+    try {
+      const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
+      for (const tokenAccount of tokenAccounts.value) {
+        const parsed = tokenAccount.account.data.parsed as {
+          info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
+        };
+        if (parsed.info?.mint !== mintKey) {
+          continue;
+        }
+
+        return {
+          cargoPod,
+          tokenAccount: tokenAccount.pubkey,
+          balance: parseTokenAmount(parsed.info.tokenAmount),
+        };
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to fetch cargo pod token account for ${cargoPod.toBase58()}`, err);
     }
 
     return null;
@@ -2109,23 +2151,27 @@ export class LmMarketBot {
 
     const cacheKey = starbasePlayer.toBase58();
     const cached = this.cargoPodCache.get(cacheKey);
-    if (cached) {
-      return cached;
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
     }
 
-    try {
+    const promise = (async () => {
       const accounts = await this.connection.getProgramAccounts(CARGO_PROGRAM_ID, {
         commitment: 'confirmed',
         filters: [{ memcmp: { offset: CARGO_POD_AUTHORITY_OFFSET, bytes: starbasePlayer.toBase58() } }],
         dataSlice: { offset: 0, length: 0 },
       });
-      const cargoPods = accounts.map((account) => account.pubkey);
-      this.cargoPodCache.set(cacheKey, cargoPods);
-      return cargoPods;
-    } catch (err) {
+      return accounts.map((account) => account.pubkey);
+    })().catch((err) => {
       this.logger.warn(`Failed to resolve cargo pods for starbasePlayer ${starbasePlayer.toBase58()}`, err);
       return [];
-    }
+    });
+
+    this.cargoPodCache.set(cacheKey, {
+      expiresAt: Date.now() + CARGO_POD_LIST_CACHE_TTL_MS,
+      promise,
+    });
+    return promise;
   }
 
   private async getStarbasePlayer(starbaseName: string): Promise<PublicKey | null> {
@@ -2141,11 +2187,12 @@ export class LmMarketBot {
     }
 
     const cacheKey = `${ownerProfile}:${starbase.publicKey}`;
-    if (this.starbasePlayerCache.has(cacheKey)) {
-      return this.starbasePlayerCache.get(cacheKey) ?? null;
+    const cached = this.starbasePlayerCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
     }
 
-    try {
+    const promise = (async () => {
       const ownerProfileKey = new PublicKey(ownerProfile);
       const starbaseKey = new PublicKey(starbase.publicKey);
       const accounts = await this.connection.getProgramAccounts(SAGE_PROGRAM_ID, {
@@ -2156,47 +2203,53 @@ export class LmMarketBot {
         ],
         dataSlice: { offset: 0, length: 0 },
       });
-      const starbasePlayer = accounts[0]?.pubkey ?? null;
-      this.starbasePlayerCache.set(cacheKey, starbasePlayer);
-      return starbasePlayer;
-    } catch (err) {
+      return accounts[0]?.pubkey ?? null;
+    })().catch((err) => {
       this.logger.warn(`Failed to resolve starbasePlayer for ${starbaseName}`, err);
-      this.starbasePlayerCache.set(cacheKey, null);
       return null;
-    }
+    });
+
+    this.starbasePlayerCache.set(cacheKey, {
+      expiresAt: Date.now() + STARBASE_PLAYER_CACHE_TTL_MS,
+      promise,
+    });
+    return promise;
   }
 
   private async getCargoPodTokenBalances(cargoPod: PublicKey): Promise<Map<string, number>> {
     const cacheKey = cargoPod.toBase58();
     const cached = this.cargoPodTokenBalanceCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
-      return cached.balances;
+      return cached.promise;
     }
 
-    const balances = new Map<string, number>();
-    try {
-      const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
-      for (const tokenAccount of tokenAccounts.value) {
-        const parsed = tokenAccount.account.data.parsed as {
-          info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
-        };
-        const mint = parsed.info?.mint;
-        if (!mint) {
-          continue;
+    const promise = (async () => {
+      const balances = new Map<string, number>();
+      try {
+        const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
+        for (const tokenAccount of tokenAccounts.value) {
+          const parsed = tokenAccount.account.data.parsed as {
+            info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
+          };
+          const mint = parsed.info?.mint;
+          if (!mint) {
+            continue;
+          }
+          const tokenAmount = parsed.info?.tokenAmount;
+          const amount = parseTokenAmount(tokenAmount);
+          balances.set(mint, (balances.get(mint) ?? 0) + amount);
         }
-        const tokenAmount = parsed.info?.tokenAmount;
-        const amount = parseTokenAmount(tokenAmount);
-        balances.set(mint, (balances.get(mint) ?? 0) + amount);
+      } catch (err) {
+        this.logger.warn(`Failed to fetch cargo pod token balances for ${cacheKey}`, err);
       }
-    } catch (err) {
-      this.logger.warn(`Failed to fetch cargo pod token balances for ${cacheKey}`, err);
-    }
+      return balances;
+    })();
 
     this.cargoPodTokenBalanceCache.set(cacheKey, {
       expiresAt: Date.now() + CARGO_POD_TOKEN_CACHE_TTL_MS,
-      balances,
+      promise,
     });
-    return balances;
+    return promise;
   }
 
   private async resolveLocalMarketSellContext(
@@ -2360,6 +2413,7 @@ export class LmMarketBot {
     const sig = await this.signAndSend(transaction);
     this.walletBalanceCache.delete(`${context.certificateMint.toBase58()}:${TOKEN_2022_PROGRAM_ID.toBase58()}`);
     this.cargoPodTokenBalanceCache.delete(context.cargoPod.toBase58());
+    this.cargoPodTokenAccountCache.delete(`${context.cargoPod.toBase58()}:${context.rawResource.mint.toBase58()}`);
 
     await this.appendLog({
       event: 'MINT_CERTIFICATES',
@@ -2457,19 +2511,27 @@ export class LmMarketBot {
   }
 
   private async getSolBalance(options?: { refresh?: boolean }): Promise<number> {
-    if (!options?.refresh && this.solBalanceCache != null) {
-      return this.solBalanceCache;
+    const cached = this.solBalanceCache;
+    if (!options?.refresh && cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
     }
 
-    try {
-      const solLamports = await this.connection.getBalance(this.wallet.publicKey, 'confirmed');
-      const solBalance = solLamports / 1e9;
-      this.solBalanceCache = solBalance;
-      return solBalance;
-    } catch (err) {
-      this.logger.warn('Failed to fetch SOL balance', err);
-      return this.solBalanceCache ?? 0;
-    }
+    const fallback = cached?.promise;
+    const promise = (async () => {
+      try {
+        const solLamports = await this.connection.getBalance(this.wallet.publicKey, 'confirmed');
+        return solLamports / 1e9;
+      } catch (err) {
+        this.logger.warn('Failed to fetch SOL balance', err);
+        return fallback ? await fallback.catch(() => 0) : 0;
+      }
+    })();
+
+    this.solBalanceCache = {
+      expiresAt: Date.now() + SOL_BALANCE_CACHE_TTL_MS,
+      promise,
+    };
+    return promise;
   }
 
   private async getWalletBalanceForMint(
@@ -2479,27 +2541,34 @@ export class LmMarketBot {
   ): Promise<number> {
     const tokenProgramId = options?.tokenProgramId ?? TOKEN_PROGRAM_ID;
     const mintKey = `${mint.toBase58()}:${tokenProgramId.toBase58()}`;
-    if (!options?.refresh && this.walletBalanceCache.has(mintKey)) {
-      return this.walletBalanceCache.get(mintKey) ?? 0;
+    const cached = this.walletBalanceCache.get(mintKey);
+    if (!options?.refresh && cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
     }
 
     const ata = await getAssociatedTokenAddress(mint, this.wallet.publicKey, false, tokenProgramId);
-    try {
-      const balance = await this.connection.getTokenAccountBalance(ata);
-      const amount = Number(balance.value.amount ?? '0');
-      const decimals = balance.value.decimals ?? 0;
-      const normalized = amount / 10 ** decimals;
-      this.walletBalanceCache.set(mintKey, normalized);
-      return normalized;
-    } catch (err) {
-      const message = (err as Error).message ?? '';
-      if (message.includes('could not find account')) {
-        this.walletBalanceCache.set(mintKey, 0);
-        return 0;
+    const fallback = cached?.promise;
+    const promise = (async () => {
+      try {
+        const balance = await this.connection.getTokenAccountBalance(ata);
+        const amount = Number(balance.value.amount ?? '0');
+        const decimals = balance.value.decimals ?? 0;
+        return amount / 10 ** decimals;
+      } catch (err) {
+        const message = (err as Error).message ?? '';
+        if (message.includes('could not find account')) {
+          return 0;
+        }
+        this.logger.warn(`Failed to fetch ${resourceName} balance`, err);
+        return fallback ? await fallback.catch(() => 0) : 0;
       }
-      this.logger.warn(`Failed to fetch ${resourceName} balance`, err);
-      return this.walletBalanceCache.get(mintKey) ?? 0;
-    }
+    })();
+
+    this.walletBalanceCache.set(mintKey, {
+      expiresAt: Date.now() + WALLET_TOKEN_BALANCE_CACHE_TTL_MS,
+      promise,
+    });
+    return promise;
   }
 
   private async submitTransactionRateLimited(
@@ -3084,7 +3153,6 @@ export class LmMarketBot {
     await this.detectFills(sellResource, 'sell', myOrders, cancelledIds);
 
     const walletSellBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
-      refresh: true,
       tokenProgramId: localMarketContext ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
     });
     const cargoSellBalance = rule ? await this.getStarbaseCargoPodBalance(rule, resource) : null;
@@ -3307,7 +3375,7 @@ export class LmMarketBot {
     const maxBuyQuantity = rule.quantity;
     const minBuyQuantity = rule.minQuantity;
     const maxBuyPrice = rule.price;
-    const inventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name, { refresh: true });
+    const inventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name);
     const remainingBuyAllowance = Math.max(0, Math.floor((rule.limit ?? Number.POSITIVE_INFINITY) - inventoryBalance));
     const possibleTargetQuantity = Math.min(maxBuyQuantity, remainingBuyAllowance);
     const targetQuantity = possibleTargetQuantity >= minBuyQuantity ? possibleTargetQuantity : 0;
@@ -3497,8 +3565,6 @@ export class LmMarketBot {
   }
 
   private async runCycle() {
-    this.walletBalanceCache.clear();
-    this.solBalanceCache = null;
     this.passiveOpenOrdersCache.clear();
 
     if (this.config.assetRules.length > 0) {
@@ -3858,6 +3924,7 @@ export class LmMarketBot {
     const tx = await this.signAndSend(transaction);
     this.walletBalanceCache.delete(`${context.certificateMint.toBase58()}:${TOKEN_2022_PROGRAM_ID.toBase58()}`);
     this.cargoPodTokenBalanceCache.delete(context.cargoPod.toBase58());
+    this.cargoPodTokenAccountCache.delete(`${context.cargoPod.toBase58()}:${context.rawResource.mint.toBase58()}`);
     this.invalidateStatusSnapshotCache();
 
     await this.appendLog({
