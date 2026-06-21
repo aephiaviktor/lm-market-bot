@@ -3164,6 +3164,28 @@ export class LmMarketBot {
       this.logger.info(`${resource.name} starbase cargo inventory: ${cargoSellBalance}`);
     }
 
+    if (rule && !localMarketContext && (cargoSellBalance ?? 0) > 0) {
+      this.logger.warn(
+        `${resource.name} starbase cargo inventory exists (${cargoSellBalance}) but local-market sell context is unavailable. ` +
+          'Skipping this cycle and retrying later.',
+      );
+      await this.appendLog({
+        event: 'SKIP_LOCAL_MARKET_CONTEXT',
+        side: 'sell',
+        asset: rule.asset,
+        resource: resource.name,
+        mint: resource.mint.toBase58(),
+        balance: walletSellBalance,
+        cargoBalance: cargoSellBalance,
+        minSellQuantity,
+        inventorySource: 'starbase-cargo-pod',
+        retryable: true,
+        message:
+          'Starbase cargo exists, but the bot could not resolve the certificate/local-market context needed to mint and sell it.',
+      });
+      return;
+    }
+
     const sortedMyOrders = [...myOrders].sort((a, b) => {
       const priceCompare = a.uiPrice - b.uiPrice;
       if (Math.abs(priceCompare) >= ORDER_PRICE_EPSILON) {
