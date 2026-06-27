@@ -629,6 +629,15 @@ type OpenOrderStatusTarget = {
   passiveCache: boolean;
 };
 
+type DesiredBuyOrder = {
+  rule: AssetRuleConfig;
+  ruleIndex: number;
+  targetPrice: number;
+  targetQuantity: number;
+  maxBuyPrice: number;
+  quoteSymbol: 'ATLAS' | 'USDC';
+};
+
 type OrderSnapshot = {
   price: number;
   remaining: number;
@@ -3517,6 +3526,192 @@ export class LmMarketBot {
     await this.placeOrder(resource, 'buy', targetPrice, targetQuantity, new Set<string>(), quoteMint);
   }
 
+  private async processBuyRules(
+    rules: Array<{ index: number; rule: AssetRuleConfig }>,
+    resource: ResourceConfig,
+    quoteMintOverride?: PublicKey,
+    marketOrderSnapshot?: MarketOrderSnapshot,
+  ) {
+    this.logger.info(`[${new Date().toISOString()}] Checking ${resource.name} buy market for ${rules.length} rules...`);
+    const cancelledIds = new Set<string>();
+    const { allOrdersRaw, myOrdersRaw } = marketOrderSnapshot ?? (await this.readMarketOrderSnapshot(resource));
+
+    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(resource);
+    const quoteSymbol = getQuoteSymbolForMint(quoteMint);
+    const isShipMarket = quoteMint.equals(QUOTE_USDC_MINT);
+    const allOrders = allOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint));
+    const myOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint));
+    const staleQuoteOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && !isOrderForQuoteMint(o, quoteMint));
+
+    for (const staleOrder of staleQuoteOrders) {
+      await this.cancelOrder(staleOrder, resource, 'buy', cancelledIds);
+    }
+
+    await this.detectFills(resource, 'buy', myOrders, cancelledIds);
+
+    const inventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name);
+    const desiredOrders: DesiredBuyOrder[] = [];
+
+    for (const { index, rule } of rules) {
+      const maxBuyQuantity = rule.quantity;
+      const minBuyQuantity = rule.minQuantity;
+      const maxBuyPrice = rule.price;
+      const remainingBuyAllowance = Math.max(0, Math.floor((rule.limit ?? Number.POSITIVE_INFINITY) - inventoryBalance));
+      const possibleTargetQuantity = Math.min(maxBuyQuantity, remainingBuyAllowance);
+      const targetQuantity = possibleTargetQuantity >= minBuyQuantity ? possibleTargetQuantity : 0;
+      const relevantBuyQuantity = getRelevantOrderThreshold(Math.max(1, targetQuantity), this.config.relevantBuyOrderPct);
+      const targetPrice =
+        targetQuantity > 0
+          ? this.getTargetBuyPrice(
+              allOrders,
+              maxBuyPrice,
+              relevantBuyQuantity,
+              { ...(isShipMarket ? { outbidPct: SHIP_BUY_OUTBID_PCT } : {}), minPrice: rule.minPrice },
+            )
+          : maxBuyPrice;
+
+      desiredOrders.push({
+        rule,
+        ruleIndex: index,
+        targetPrice,
+        targetQuantity,
+        maxBuyPrice,
+        quoteSymbol,
+      });
+    }
+
+    const activeOrders = [...myOrders].sort((a, b) => {
+      const priceCompare = b.uiPrice - a.uiPrice;
+      if (Math.abs(priceCompare) >= ORDER_PRICE_EPSILON) {
+        return priceCompare;
+      }
+      return a.id.localeCompare(b.id);
+    });
+    const matchedOrderIds = new Set<string>();
+    const matches = new Map<number, Order>();
+
+    const findBestMatch = (desired: DesiredBuyOrder): Order | undefined => {
+      const candidates = activeOrders.filter((order) => !matchedOrderIds.has(order.id));
+      if (candidates.length === 0) {
+        return undefined;
+      }
+
+      const exactMatch = candidates.find(
+        (order) =>
+          Math.abs(order.uiPrice - desired.targetPrice) < ORDER_PRICE_EPSILON &&
+          getOrderRemainingQuantity(order) === desired.targetQuantity,
+      );
+      if (exactMatch) {
+        return exactMatch;
+      }
+
+      return candidates.sort((a, b) => {
+        const aPriceDelta = Math.abs(a.uiPrice - desired.targetPrice);
+        const bPriceDelta = Math.abs(b.uiPrice - desired.targetPrice);
+        if (Math.abs(aPriceDelta - bPriceDelta) >= ORDER_PRICE_EPSILON) {
+          return aPriceDelta - bPriceDelta;
+        }
+        return Math.abs(getOrderRemainingQuantity(a) - desired.targetQuantity) -
+          Math.abs(getOrderRemainingQuantity(b) - desired.targetQuantity);
+      })[0];
+    };
+
+    for (const desired of desiredOrders) {
+      if (desired.targetQuantity <= 0) {
+        continue;
+      }
+      const match = findBestMatch(desired);
+      if (match) {
+        matchedOrderIds.add(match.id);
+        matches.set(desired.ruleIndex, match);
+      }
+    }
+
+    let quoteBalance = await this.getWalletBalanceForMint(quoteMint, quoteSymbol);
+    this.logger.info(`${quoteSymbol} balance: ${quoteBalance}`);
+    this.logger.info(`${resource.name} inventory balance: ${inventoryBalance}`);
+    this.logger.info(`Planning ${desiredOrders.length} buy order(s) for ${resource.name}.`);
+
+    for (const order of activeOrders) {
+      if (matchedOrderIds.has(order.id)) {
+        continue;
+      }
+
+      this.logger.info(`Cancelling extra buy order ${order.id} for ${resource.name}.`);
+      await this.cancelOrder(order, resource, 'buy', cancelledIds);
+      quoteBalance += order.uiPrice * getOrderRemainingQuantity(order);
+    }
+
+    for (const desired of desiredOrders) {
+      const activeOrder = matches.get(desired.ruleIndex);
+
+      if (desired.targetQuantity <= 0) {
+        this.logger.info(
+          `Buy limit reached for ${resource.name} rule ${desired.ruleIndex}. Inventory ${inventoryBalance} is at or above limit ${desired.rule.limit}.`,
+        );
+        if (activeOrder) {
+          await this.cancelOrder(activeOrder, resource, 'buy', cancelledIds);
+          quoteBalance += activeOrder.uiPrice * getOrderRemainingQuantity(activeOrder);
+        }
+        continue;
+      }
+
+      this.logger.info(
+        `Rule ${desired.ruleIndex}: buy up to ${desired.targetQuantity} ${resource.name} at max ${desired.maxBuyPrice} ${quoteSymbol} (target ${desired.targetPrice}).`,
+      );
+
+      const activeQuantity = activeOrder ? getOrderRemainingQuantity(activeOrder) : 0;
+      const priceDelta = activeOrder ? Math.abs(activeOrder.uiPrice - desired.targetPrice) : Number.POSITIVE_INFINITY;
+      const quantityChanged = activeQuantity !== desired.targetQuantity;
+
+      if (activeOrder && !quantityChanged && priceDelta < ORDER_PRICE_EPSILON) {
+        this.logger.info(
+          `Buy order ${activeOrder.id} already matches rule ${desired.ruleIndex} at ${activeOrder.uiPrice} and quantity ${activeQuantity}.`,
+        );
+        continue;
+      }
+
+      const releasableQuoteFromActiveOrder = activeOrder ? activeOrder.uiPrice * activeQuantity : 0;
+      const requiredQuote = desired.targetQuantity * desired.targetPrice;
+      const quoteAvailableAfterCancel = quoteBalance + releasableQuoteFromActiveOrder;
+
+      if (quoteAvailableAfterCancel < requiredQuote) {
+        this.logger.info(
+          `Insufficient ${quoteSymbol} to place buy order for rule ${desired.ruleIndex}: ` +
+            `${desired.targetQuantity} ${resource.name} @ ${desired.targetPrice}. Skipping.`,
+        );
+        await this.appendLog({
+          event: 'SKIP_NO_FUNDS',
+          side: 'buy',
+          ruleIndex: desired.ruleIndex,
+          asset: desired.rule.asset,
+          resource: resource.name,
+          mint: resource.mint.toBase58(),
+          quoteCurrency: quoteSymbol,
+          quoteBalance,
+          releasableQuoteFromActiveOrder,
+          quoteAvailableAfterCancel,
+          requiredQuote,
+          quantity: desired.targetQuantity,
+          price: desired.targetPrice,
+        });
+        continue;
+      }
+
+      if (activeOrder) {
+        this.logger.info(
+          `Replacing buy order ${activeOrder.id} for rule ${desired.ruleIndex} with ` +
+            `${desired.targetQuantity} ${resource.name} @ ${desired.targetPrice}.`,
+        );
+        await this.cancelOrder(activeOrder, resource, 'buy', cancelledIds);
+        quoteBalance += releasableQuoteFromActiveOrder;
+      }
+
+      await this.placeOrder(resource, 'buy', desired.targetPrice, desired.targetQuantity, cancelledIds, quoteMint);
+      quoteBalance -= requiredQuote;
+    }
+  }
+
   private async processLegacyResource(resource: ResourceConfig) {
     await this.processSellRule(resource, this.config.minSellQuantity, this.config.minPrice);
   }
@@ -3541,8 +3736,7 @@ export class LmMarketBot {
     const sellRules = rules.filter((item) => item.rule.side === 'sell');
     const buyRules = rules.filter((item) => item.rule.side === 'buy');
     const quoteMint = group.group === 'ships' || group.group === 'ship-parts' ? QUOTE_USDC_MINT : getQuoteMintForResource(resource);
-    const hasRunnableSellRule = sellRules.length === 1;
-    const hasRunnableBuyRule = buyRules.length === 1;
+    const hasRunnableBuyRule = buyRules.length > 0;
     const marketOrderSnapshot = hasRunnableBuyRule ? await this.readMarketOrderSnapshot(resource) : undefined;
 
     if (sellRules.length > 1) {
@@ -3570,16 +3764,7 @@ export class LmMarketBot {
     }
 
     if (buyRules.length > 1) {
-      const ruleIndexes = buyRules.map((item) => item.index);
-      const message = `Duplicate buy rules for ${resource.name}, skipping buy side`;
-      this.logger.error(message);
-      await this.appendLog({
-        event: 'SKIP_DUPLICATE_BUY_RULES',
-        asset,
-        resource: resource.name,
-        mint: resource.mint.toBase58(),
-        ruleIndexes,
-      });
+      await this.processBuyRules(buyRules, resource, quoteMint, marketOrderSnapshot);
     } else if (buyRules.length === 1) {
       const buyRule = buyRules[0];
       await this.processBuyRule(buyRule.rule, buyRule.index, resource, quoteMint, marketOrderSnapshot);
@@ -4010,6 +4195,29 @@ export class LmMarketBot {
 
     const findActiveOrder = (asset: string, side: AssetRuleSide): BotOpenOrderStatus | undefined =>
       openOrders.find((order) => normalizeAssetKey(order.asset) === normalizeAssetKey(asset) && order.side === side);
+    const consumeBestOrder = (
+      candidates: BotOpenOrderStatus[],
+      rule: AssetRuleConfig,
+    ): BotOpenOrderStatus | undefined => {
+      if (candidates.length === 0) {
+        return undefined;
+      }
+
+      let bestIndex = 0;
+      let bestScore = Number.POSITIVE_INFINITY;
+
+      candidates.forEach((order, index) => {
+        const score =
+          Math.abs((order.price ?? 0) - rule.price) +
+          Math.abs((order.remaining ?? 0) - rule.quantity) / Math.max(1, rule.quantity);
+        if (score < bestScore) {
+          bestIndex = index;
+          bestScore = score;
+        }
+      });
+
+      return candidates.splice(bestIndex, 1)[0];
+    };
 
     if (this.config.assetRules.length > 0) {
       const grouped = groupRulesByAsset(this.config.assetRules);
@@ -4019,30 +4227,36 @@ export class LmMarketBot {
         const buyRules = group.rules.filter((item) => item.rule.side === 'buy');
         const sellRules = group.rules.filter((item) => item.rule.side === 'sell');
 
-        if (buyRules.length > 1) {
-          result.push({
-            asset: group.asset,
-            side: 'buy',
-            configuredQuantity: null,
-            configuredPrice: null,
-            status: 'duplicate',
-            note: `Duplicate buy rules (${buyRules.length})`,
-          });
-        } else if (buyRules.length === 1) {
-          const rule = buyRules[0].rule;
-          const openOrder = findActiveOrder(group.asset, 'buy');
-          result.push({
-            asset: group.asset,
-            side: 'buy',
-            configuredQuantity: rule.quantity,
-            configuredPrice: rule.price,
-            status: openOrder ? 'active' : 'idle',
-            openOrderId: openOrder?.id,
-            openOrderPrice: openOrder?.price,
-            openOrderRemaining: openOrder?.remaining,
-            partiallyFilled: openOrder?.partiallyFilled,
-            note: openOrder ? 'Buy order currently tracked' : 'No active buy order tracked',
-          });
+        if (buyRules.length > 0) {
+          const availableBuyOrders = openOrders
+            .filter((order) => normalizeAssetKey(order.asset) === normalizeAssetKey(group.asset) && order.side === 'buy')
+            .sort((a, b) => b.price - a.price);
+
+          for (const item of buyRules) {
+            const rule = item.rule;
+            const openOrder = consumeBestOrder(availableBuyOrders, rule);
+            const note =
+              buyRules.length > 1
+                ? openOrder
+                  ? `Buy rule ${item.index} currently tracked`
+                  : `No active buy order tracked for rule ${item.index}`
+                : openOrder
+                  ? 'Buy order currently tracked'
+                  : 'No active buy order tracked';
+
+            result.push({
+              asset: group.asset,
+              side: 'buy',
+              configuredQuantity: rule.quantity,
+              configuredPrice: rule.price,
+              status: openOrder ? 'active' : 'idle',
+              openOrderId: openOrder?.id,
+              openOrderPrice: openOrder?.price,
+              openOrderRemaining: openOrder?.remaining,
+              partiallyFilled: openOrder?.partiallyFilled,
+              note,
+            });
+          }
         }
 
         if (sellRules.length > 1) {
