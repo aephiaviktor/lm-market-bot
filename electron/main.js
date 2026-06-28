@@ -8,6 +8,7 @@ const lockfile = require('proper-lockfile');
 const { Keypair } = require('@solana/web3.js');
 const bs58 = require('bs58');
 const packageJson = require('../package.json');
+const APP_VERSION = packageJson.version || 'unknown';
 
 // ---------------------------------------------------------------------------
 // Profile isolation — one codebase can run multiple local profiles.
@@ -670,6 +671,7 @@ async function getEffectiveBotInputConfig(options = {}) {
 
 function getEmptyStatusSnapshot() {
   return {
+    version: APP_VERSION,
     running: false,
     wallet: '—',
     solBalance: 0,

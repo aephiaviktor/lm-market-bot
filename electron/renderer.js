@@ -16,7 +16,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
-const APP_VERSION = '0.2.40';
+const APP_VERSION = window.botApi?.appVersion || 'unknown';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
   'FACTION',
@@ -788,8 +788,8 @@ function formatRelativeDuration(ms) {
   return `${minutes}m ${seconds}s`;
 }
 
-function formatRuntime(startedAt, running) {
-  const versionSuffix = ` | v${APP_VERSION}`;
+function formatRuntime(startedAt, running, version = APP_VERSION) {
+  const versionSuffix = ` | v${version || APP_VERSION}`;
 
   if (!running || !startedAt) {
     return `Stopped${versionSuffix}`;
@@ -1194,7 +1194,7 @@ function renderStatusSnapshot(snapshot) {
   botRuntimeEl.textContent = formatRuntime(
     snapshot?.startedAt,
     running,
-    snapshot?.lastCycleCompletedAt || snapshot?.lastCycleStartedAt
+    snapshot?.version
   );
 
   lastCycleAtEl.textContent = formatTimestamp(snapshot?.lastCycleCompletedAt || snapshot?.lastCycleStartedAt);

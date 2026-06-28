@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const packageJson = require('../package.json');
 
 contextBridge.exposeInMainWorld('botApi', {
+  appVersion: packageJson.version || 'unknown',
   getSettings: () => ipcRenderer.invoke('settings:get'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
   saveSettings: (config) => ipcRenderer.invoke('settings:save', config),

@@ -39,6 +39,7 @@ import { RpcLimiter } from 'rpc_limiter';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
 import path from 'path';
+import packageJson from '../package.json';
 import {
   GM_MARKET_ASSET_REGISTRY,
   formatAssetRegistryResourceList,
@@ -70,7 +71,7 @@ const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
 const RPC_LATEST_BLOCKHASH_REUSE_MS = 45000;
 const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
 const RPC_METHOD_COUNTER_LOG_INTERVAL_MS = 300000;
-const APP_VERSION = '0.2.40';
+const APP_VERSION = packageJson.version || 'unknown';
 const DEFAULT_RPC_REQUESTS_PER_SECOND = 10;
 const MAX_RPC_REQUESTS_PER_SECOND = 10;
 const DEFAULT_RPC_TX_SEND_RATE_LIMIT_PER_SECOND = 1;
@@ -828,6 +829,7 @@ export type BotRuleHealthStatus = {
 };
 
 export type BotStatusSnapshot = {
+  version: string;
   running: boolean;
   wallet: string;
   solBalance: number;
@@ -1879,6 +1881,7 @@ export class LmMarketBot {
     const ruleHealth = this.buildRuleHealthSnapshot(openOrders);
 
     const snapshot = {
+      version: APP_VERSION,
       running: this.running,
       wallet,
       solBalance,
