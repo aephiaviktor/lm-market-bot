@@ -1,8 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const packageJson = require('../package.json');
+
+function getAppVersion() {
+  const prefix = '--lm-market-bot-version=';
+  const arg = process.argv.find((entry) => String(entry || '').startsWith(prefix));
+  return arg ? arg.slice(prefix.length) : 'unknown';
+}
 
 contextBridge.exposeInMainWorld('botApi', {
-  appVersion: packageJson.version || 'unknown',
+  appVersion: getAppVersion(),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   getLogs: () => ipcRenderer.invoke('logs:get'),
   saveSettings: (config) => ipcRenderer.invoke('settings:save', config),

@@ -187,6 +187,12 @@ async function openUpdateDialog() {
 }
 
 async function checkForUpdatesAndRenderButton() {
+  if (typeof window.botApi?.checkForUpdates !== 'function') {
+    const err = new Error('Updater bridge unavailable. Restart LM Market Bot and try again.');
+    renderUpdateButtonState(null, err);
+    throw err;
+  }
+
   if (updateCheckInFlight) {
     return updateCheckPromise || availableUpdate;
   }
@@ -1473,6 +1479,13 @@ updateModal.addEventListener('click', (event) => {
 
 updateConfirmBtn.addEventListener('click', async () => {
   if (!availableUpdate?.updateAvailable) return;
+  if (typeof window.botApi?.downloadUpdateAndRestart !== 'function') {
+    const err = new Error('Updater bridge unavailable. Restart LM Market Bot and try again.');
+    renderUpdateModalState(availableUpdate, err);
+    appendLog(`[${new Date().toISOString()}] [ERROR] Update failed: ${err.message}`);
+    return;
+  }
+
   updateConfirmBtn.disabled = true;
   updateCancelBtn.disabled = true;
   updateMessageEl.textContent = `Downloading LM Market Bot v${availableUpdate.latestVersion} and restarting...`;

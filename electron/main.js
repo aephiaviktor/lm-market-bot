@@ -799,6 +799,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      additionalArguments: [`--lm-market-bot-version=${APP_VERSION}`],
     },
   });
 
