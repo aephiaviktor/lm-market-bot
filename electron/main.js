@@ -435,6 +435,10 @@ function getSettingsPath() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
 
+function getSettingsBackupPath() {
+  return path.join(app.getPath('userData'), 'settings.previous.json');
+}
+
 function normalizeAssetRules(rows) {
   if (!Array.isArray(rows)) {
     return [];
@@ -623,8 +627,16 @@ async function saveLocalSettings(payload) {
 
   filtered.ASSET_RULE_ROWS = normalizeAssetRules(payload?.assetRules ?? current.ASSET_RULE_ROWS ?? []);
 
-  await fs.mkdir(path.dirname(getSettingsPath()), { recursive: true });
-  await fs.writeFile(getSettingsPath(), JSON.stringify(filtered, null, 2), 'utf8');
+  const settingsPath = getSettingsPath();
+  await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+  try {
+    await fs.copyFile(settingsPath, getSettingsBackupPath());
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      throw err;
+    }
+  }
+  await fs.writeFile(settingsPath, JSON.stringify(filtered, null, 2), 'utf8');
   return filtered;
 }
 
