@@ -105,7 +105,6 @@ function isDedicatedProfileInstall() {
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-software-rasterizer');
 
 const { resolvePaths } = require('rpc_limiter');
 const {
