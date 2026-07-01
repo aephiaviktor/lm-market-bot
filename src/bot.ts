@@ -699,14 +699,15 @@ type ResourceOrderState = {
 
 type BotState = Record<string, ResourceOrderState>;
 
-type CargoPodTokenBalanceCacheEntry = {
-  expiresAt: number;
-  promise: Promise<Map<string, number>>;
+type CargoPodTokenAccountInfo = {
+  cargoPod: PublicKey;
+  tokenAccount: PublicKey;
+  balance: number;
 };
 
-type CargoPodTokenAccountCacheEntry = {
+type CargoPodTokenInventoryCacheEntry = {
   expiresAt: number;
-  promise: Promise<{ cargoPod: PublicKey; tokenAccount: PublicKey; balance: number } | null>;
+  promise: Promise<Map<string, CargoPodTokenAccountInfo>>;
 };
 
 type ExpiringPromiseCacheEntry<T> = {
@@ -1763,8 +1764,7 @@ export class LmMarketBot {
   private readonly localMarketSellContextCache = new Map<string, LocalMarketSellContextCacheEntry>();
   private readonly starbasePlayerCache = new Map<string, ExpiringPromiseCacheEntry<PublicKey | null>>();
   private readonly cargoPodCache = new Map<string, ExpiringPromiseCacheEntry<PublicKey[]>>();
-  private readonly cargoPodTokenBalanceCache = new Map<string, CargoPodTokenBalanceCacheEntry>();
-  private readonly cargoPodTokenAccountCache = new Map<string, CargoPodTokenAccountCacheEntry>();
+  private readonly cargoPodTokenInventoryCache = new Map<string, CargoPodTokenInventoryCacheEntry>();
   private solBalanceCache: ExpiringPromiseCacheEntry<number> | null = null;
   private statusSnapshotCache: { expiresAt: number; snapshot: BotStatusSnapshot } | null = null;
   private transactionSubmissionQueue: Promise<void> = Promise.resolve();
@@ -1852,7 +1852,7 @@ export class LmMarketBot {
     this.localMarketSellContextCache.clear();
     this.starbasePlayerCache.clear();
     this.cargoPodCache.clear();
-    this.cargoPodTokenBalanceCache.clear();
+    this.cargoPodTokenInventoryCache.clear();
     this.solBalanceCache = null;
     this.invalidateStatusSnapshotCache();
   }
@@ -2099,8 +2099,8 @@ export class LmMarketBot {
     const mintKey = resource.mint.toBase58();
     let balance = 0;
     for (const cargoPod of cargoPods) {
-      const tokenBalances = await this.getCargoPodTokenBalances(cargoPod);
-      balance += tokenBalances.get(mintKey) ?? 0;
+      const inventory = await this.getCargoPodTokenInventory(cargoPod);
+      balance += inventory.get(mintKey)?.balance ?? 0;
     }
 
     return balance;
@@ -2114,23 +2114,8 @@ export class LmMarketBot {
     const mintKey = resource.mint.toBase58();
 
     for (const cargoPod of cargoPods) {
-      const cacheKey = `${cargoPod.toBase58()}:${mintKey}`;
-      const cached = this.cargoPodTokenAccountCache.get(cacheKey);
-      if (cached && cached.expiresAt > Date.now()) {
-        const account = await cached.promise;
-        if (account) {
-          return account;
-        }
-        continue;
-      }
-
-      const promise = this.readCargoPodTokenAccount(cargoPod, mintKey);
-      this.cargoPodTokenAccountCache.set(cacheKey, {
-        expiresAt: Date.now() + CARGO_POD_TOKEN_CACHE_TTL_MS,
-        promise,
-      });
-
-      const account = await promise;
+      const inventory = await this.getCargoPodTokenInventory(cargoPod);
+      const account = inventory.get(mintKey) ?? null;
       if (account) {
         return account;
       }
@@ -2139,31 +2124,46 @@ export class LmMarketBot {
     return null;
   }
 
-  private async readCargoPodTokenAccount(
-    cargoPod: PublicKey,
-    mintKey: string,
-  ): Promise<{ cargoPod: PublicKey; tokenAccount: PublicKey; balance: number } | null> {
-    try {
+  private async getCargoPodTokenInventory(cargoPod: PublicKey): Promise<Map<string, CargoPodTokenAccountInfo>> {
+    const cacheKey = cargoPod.toBase58();
+    const cached = this.cargoPodTokenInventoryCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.promise;
+    }
+
+    const promise = (async () => {
+      const inventory = new Map<string, CargoPodTokenAccountInfo>();
       const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
       for (const tokenAccount of tokenAccounts.value) {
         const parsed = tokenAccount.account.data.parsed as {
           info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
         };
-        if (parsed.info?.mint !== mintKey) {
+        const info = parsed.info;
+        const mint = info?.mint;
+        if (!mint) {
           continue;
         }
 
-        return {
+        const amount = parseTokenAmount(info.tokenAmount);
+        const existing = inventory.get(mint);
+        inventory.set(mint, {
           cargoPod,
-          tokenAccount: tokenAccount.pubkey,
-          balance: parseTokenAmount(parsed.info.tokenAmount),
-        };
+          tokenAccount: existing && existing.balance > 0 ? existing.tokenAccount : tokenAccount.pubkey,
+          balance: (existing?.balance ?? 0) + amount,
+        });
       }
-    } catch (err) {
-      this.logger.warn(`Failed to fetch cargo pod token account for ${cargoPod.toBase58()}`, err);
-    }
+      return inventory;
+    })().catch((err) => {
+      this.cargoPodTokenInventoryCache.delete(cacheKey);
+      this.logger.warn(`Failed to fetch cargo pod token inventory for ${cacheKey}`, err);
+      throw err;
+    });
 
-    return null;
+    this.cargoPodTokenInventoryCache.set(cacheKey, {
+      expiresAt: Date.now() + CARGO_POD_TOKEN_CACHE_TTL_MS,
+      promise,
+    });
+    return promise;
   }
 
   private async resolveOwnerProfileKeyIndex(): Promise<number | null> {
@@ -2270,42 +2270,6 @@ export class LmMarketBot {
 
     this.starbasePlayerCache.set(cacheKey, {
       expiresAt: Date.now() + STARBASE_PLAYER_CACHE_TTL_MS,
-      promise,
-    });
-    return promise;
-  }
-
-  private async getCargoPodTokenBalances(cargoPod: PublicKey): Promise<Map<string, number>> {
-    const cacheKey = cargoPod.toBase58();
-    const cached = this.cargoPodTokenBalanceCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.promise;
-    }
-
-    const promise = (async () => {
-      const balances = new Map<string, number>();
-      try {
-        const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(cargoPod, { programId: TOKEN_PROGRAM_ID });
-        for (const tokenAccount of tokenAccounts.value) {
-          const parsed = tokenAccount.account.data.parsed as {
-            info?: { mint?: string; tokenAmount?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } };
-          };
-          const mint = parsed.info?.mint;
-          if (!mint) {
-            continue;
-          }
-          const tokenAmount = parsed.info?.tokenAmount;
-          const amount = parseTokenAmount(tokenAmount);
-          balances.set(mint, (balances.get(mint) ?? 0) + amount);
-        }
-      } catch (err) {
-        this.logger.warn(`Failed to fetch cargo pod token balances for ${cacheKey}`, err);
-      }
-      return balances;
-    })();
-
-    this.cargoPodTokenBalanceCache.set(cacheKey, {
-      expiresAt: Date.now() + CARGO_POD_TOKEN_CACHE_TTL_MS,
       promise,
     });
     return promise;
@@ -2471,8 +2435,7 @@ export class LmMarketBot {
 
     const sig = await this.signAndSend(transaction);
     this.walletBalanceCache.delete(`${context.certificateMint.toBase58()}:${TOKEN_2022_PROGRAM_ID.toBase58()}`);
-    this.cargoPodTokenBalanceCache.delete(context.cargoPod.toBase58());
-    this.cargoPodTokenAccountCache.delete(`${context.cargoPod.toBase58()}:${context.rawResource.mint.toBase58()}`);
+    this.cargoPodTokenInventoryCache.delete(context.cargoPod.toBase58());
 
     await this.appendLog({
       event: 'MINT_CERTIFICATES',
@@ -4200,8 +4163,7 @@ export class LmMarketBot {
 
     const tx = await this.signAndSend(transaction);
     this.walletBalanceCache.delete(`${context.certificateMint.toBase58()}:${TOKEN_2022_PROGRAM_ID.toBase58()}`);
-    this.cargoPodTokenBalanceCache.delete(context.cargoPod.toBase58());
-    this.cargoPodTokenAccountCache.delete(`${context.cargoPod.toBase58()}:${context.rawResource.mint.toBase58()}`);
+    this.cargoPodTokenInventoryCache.delete(context.cargoPod.toBase58());
     this.invalidateStatusSnapshotCache();
 
     await this.appendLog({
