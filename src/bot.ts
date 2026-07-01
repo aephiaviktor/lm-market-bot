@@ -613,6 +613,17 @@ type MarketOrderSnapshotCacheEntry = {
   promise: Promise<MarketOrderSnapshot>;
 };
 
+type MarketLeaderCacheEntry = {
+  expiresAt: number;
+  bestBuyPrice: number | null;
+  bestSellPrice: number | null;
+};
+
+type MarketLeaderThresholdsCacheEntry = {
+  expiresAt: number;
+  promise: Promise<Map<string, { buy: number; sell: number }>>;
+};
+
 type MyOpenOrdersCacheEntry = {
   expiresAt: number;
   promise: Promise<Order[]>;
@@ -1715,7 +1726,8 @@ export class LmMarketBot {
   private lastCycleCompletedAt: string | null = null;
   private lastCycleDurationMs: number | null = null;
   private readonly passiveOpenOrdersCache = new Map<string, BotOpenOrderStatus[]>();
-  private readonly marketLeaderCache = new Map<string, { expiresAt: number; bestBuyPrice: number | null; bestSellPrice: number | null }>();
+  private readonly marketLeaderCache = new Map<string, MarketLeaderCacheEntry>();
+  private marketLeaderThresholdsCache: MarketLeaderThresholdsCacheEntry | null = null;
   private readonly marketOrderSnapshotCache = new Map<string, MarketOrderSnapshotCacheEntry>();
   private readonly myOpenOrdersCache = new Map<string, MyOpenOrdersCacheEntry>();
   private readonly walletBalanceCache = new Map<string, ExpiringPromiseCacheEntry<number>>();
@@ -1804,6 +1816,7 @@ export class LmMarketBot {
     this.checkIntervalMs = this.config.checkIntervalMinutes * 60 * 1000;
     this.passiveOpenOrdersCache.clear();
     this.marketLeaderCache.clear();
+    this.marketLeaderThresholdsCache = null;
     this.marketOrderSnapshotCache.clear();
     this.myOpenOrdersCache.clear();
     this.walletBalanceCache.clear();
@@ -1816,7 +1829,11 @@ export class LmMarketBot {
   }
 
   private invalidateMarketLeaderCacheForMint(mint: string) {
-    this.marketLeaderCache.delete(mint);
+    for (const key of this.marketLeaderCache.keys()) {
+      if (key === mint || key.startsWith(`${mint}:`)) {
+        this.marketLeaderCache.delete(key);
+      }
+    }
     this.marketOrderSnapshotCache.delete(mint);
     this.myOpenOrdersCache.delete(mint);
     this.statusSnapshotCache = null;
@@ -3121,6 +3138,11 @@ export class LmMarketBot {
     const promise = (async () => {
       const allOrdersRaw = await this.gm.getOpenOrdersForAsset(this.connection, resource.mint, GM_PROGRAM_ID);
       const myOrdersRaw = await this.readMyOpenOrdersForResource(resource, options);
+      try {
+        await this.cacheMarketLeadersFromOrders(resource.mint, allOrdersRaw);
+      } catch (error) {
+        this.logger.warn(`Failed to cache market leader data for ${resource.name}:`, error);
+      }
       return { allOrdersRaw, myOrdersRaw };
     })().catch((error) => {
       this.marketOrderSnapshotCache.delete(mintKey);
@@ -4000,12 +4022,55 @@ export class LmMarketBot {
     return thresholds;
   }
 
+  private async getCachedRelevantBadgeThresholds(): Promise<Map<string, { buy: number; sell: number }>> {
+    if (this.marketLeaderThresholdsCache && Date.now() < this.marketLeaderThresholdsCache.expiresAt) {
+      return this.marketLeaderThresholdsCache.promise;
+    }
+
+    const promise = this.getRelevantBadgeThresholds().catch((error) => {
+      this.marketLeaderThresholdsCache = null;
+      throw error;
+    });
+    this.marketLeaderThresholdsCache = {
+      expiresAt: Date.now() + MARKET_LEADER_CACHE_TTL_MS,
+      promise,
+    };
+
+    return promise;
+  }
+
+  private async cacheMarketLeadersFromOrders(mint: PublicKey, marketOrders: Order[]): Promise<void> {
+    const mintKey = mint.toBase58();
+    const thresholds = await this.getCachedRelevantBadgeThresholds();
+    const threshold = thresholds.get(mintKey) ?? { buy: 1, sell: 1 };
+
+    for (const quoteMint of [QUOTE_ATLAS_MINT, QUOTE_USDC_MINT]) {
+      const buyOrders = marketOrders.filter(
+        (order) =>
+          order.orderType === OrderSide.Buy &&
+          isOrderForQuoteMint(order, quoteMint) &&
+          getOrderBookQuantity(order) >= threshold.buy,
+      );
+      const sellOrders = marketOrders.filter(
+        (order) =>
+          order.orderType === OrderSide.Sell &&
+          isOrderForQuoteMint(order, quoteMint) &&
+          getOrderBookQuantity(order) >= threshold.sell,
+      );
+
+      this.marketLeaderCache.set(getMarketLeaderCacheKey(mintKey, quoteMint), {
+        expiresAt: Date.now() + Math.max(MARKET_LEADER_CACHE_TTL_MS, this.checkIntervalMs + STATUS_SNAPSHOT_CACHE_CEIL_MS),
+        bestBuyPrice: buyOrders.length ? Math.max(...buyOrders.map((order) => order.uiPrice)) : null,
+        bestSellPrice: sellOrders.length ? Math.min(...sellOrders.map((order) => order.uiPrice)) : null,
+      });
+    }
+  }
+
   private async annotateMarketLeaders(orders: BotOpenOrderStatus[]): Promise<BotOpenOrderStatus[]> {
     if (orders.length === 0) {
       return orders;
     }
 
-    const thresholds = await this.getRelevantBadgeThresholds();
     const byMarket = new Map<string, BotOpenOrderStatus[]>();
     for (const order of orders) {
       const quoteMint = order.currency === 'USDC' ? QUOTE_USDC_MINT : QUOTE_ATLAS_MINT;
@@ -4015,50 +4080,22 @@ export class LmMarketBot {
       byMarket.set(key, bucket);
     }
 
-    await Promise.all(
-      Array.from(byMarket.entries()).map(async ([marketKey, mintOrders]) => {
-        const [mint, quoteMintRaw] = marketKey.split(':');
-        const quoteMint = new PublicKey(quoteMintRaw);
-        try {
-          let cached = this.marketLeaderCache.get(marketKey);
-          if (!cached || Date.now() >= cached.expiresAt) {
-            const marketOrders = await this.gm.getOpenOrdersForAsset(this.connection, new PublicKey(mint), GM_PROGRAM_ID);
-            const threshold = thresholds.get(mint) ?? { buy: 1, sell: 1 };
-            const buyOrders = marketOrders.filter(
-              (order) =>
-                order.orderType === OrderSide.Buy &&
-                isOrderForQuoteMint(order, quoteMint) &&
-                getOrderBookQuantity(order) >= threshold.buy,
-            );
-            const sellOrders = marketOrders.filter(
-              (order) =>
-                order.orderType === OrderSide.Sell &&
-                isOrderForQuoteMint(order, quoteMint) &&
-                getOrderBookQuantity(order) >= threshold.sell,
-            );
+    for (const [marketKey, mintOrders] of byMarket.entries()) {
+      const cached = this.marketLeaderCache.get(marketKey);
+      if (!cached || Date.now() >= cached.expiresAt) {
+        continue;
+      }
 
-            cached = {
-              expiresAt: Date.now() + MARKET_LEADER_CACHE_TTL_MS,
-              bestBuyPrice: buyOrders.length ? Math.max(...buyOrders.map((order) => order.uiPrice)) : null,
-              bestSellPrice: sellOrders.length ? Math.min(...sellOrders.map((order) => order.uiPrice)) : null,
-            };
-            this.marketLeaderCache.set(marketKey, cached);
-          }
-
-          for (const order of mintOrders) {
-            if (order.side === 'buy' && cached.bestBuyPrice !== null && Math.abs(order.price - cached.bestBuyPrice) < ORDER_PRICE_EPSILON) {
-              order.marketLeader = 'hb';
-            }
-
-            if (order.side === 'sell' && cached.bestSellPrice !== null && Math.abs(order.price - cached.bestSellPrice) < ORDER_PRICE_EPSILON) {
-              order.marketLeader = 'ba';
-            }
-          }
-        } catch (err) {
-          this.logger.warn(`Failed to annotate market leader for ${mint}:`, err);
+      for (const order of mintOrders) {
+        if (order.side === 'buy' && cached.bestBuyPrice !== null && Math.abs(order.price - cached.bestBuyPrice) < ORDER_PRICE_EPSILON) {
+          order.marketLeader = 'hb';
         }
-      }),
-    );
+
+        if (order.side === 'sell' && cached.bestSellPrice !== null && Math.abs(order.price - cached.bestSellPrice) < ORDER_PRICE_EPSILON) {
+          order.marketLeader = 'ba';
+        }
+      }
+    }
 
     return orders;
   }
