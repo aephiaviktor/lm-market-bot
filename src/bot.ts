@@ -86,7 +86,8 @@ const STARBASE_PLAYER_CACHE_TTL_MS = 3600000;
 const CARGO_POD_LIST_CACHE_TTL_MS = 3600000;
 const CARGO_POD_TOKEN_CACHE_TTL_MS = 600000;
 const LOCAL_MARKET_SELL_CONTEXT_CACHE_TTL_MS = 600000;
-const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [2000, 5000, 10000];
+const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [20000, 60000, 180000];
+const RPC_TRANSIENT_TRANSPORT_RETRY_DELAYS_MS = [5000];
 const RPC_LIMITER_SLOW_WAIT_LOG_MS = 100;
 const RPC_LIMITER_WAIT_LOG_THROTTLE_MS = 60000;
 const SHIP_BUY_OUTBID_PCT = 0.005;
@@ -181,6 +182,23 @@ function isRpcRateLimitError(error: unknown): boolean {
   return text.includes('429') || text.includes('too many requests') || text.includes('rate limit');
 }
 
+function isTransientRpcTransportError(error: unknown): boolean {
+  const text = getErrorText(error).toLowerCase();
+  return (
+    text.includes('fetch failed') ||
+    text.includes('network error') ||
+    text.includes('socket hang up') ||
+    text.includes('econnreset') ||
+    text.includes('econnrefused') ||
+    text.includes('etimedout') ||
+    text.includes('timeout') ||
+    text.includes('und_err_connect_timeout') ||
+    text.includes('und_err_headers_timeout') ||
+    text.includes('und_err_socket') ||
+    text.includes('terminated')
+  );
+}
+
 async function getSendTransactionLogs(error: unknown, connection: Connection): Promise<string[] | null> {
   if (error instanceof SendTransactionError) {
     try {
@@ -216,15 +234,26 @@ async function callRpcWithRateLimitRetry<T>(
       await limiter.wait(label, bucketName, method);
       return await invoke();
     } catch (error) {
-      const retryDelayMs = RPC_RATE_LIMIT_RETRY_DELAYS_MS[attempt];
-      if (!isRpcRateLimitError(error) || retryDelayMs === undefined) {
+      const isRateLimit = isRpcRateLimitError(error);
+      const isTransientTransport = isTransientRpcTransportError(error);
+      const retryDelaysMs = isRateLimit ? RPC_RATE_LIMIT_RETRY_DELAYS_MS : RPC_TRANSIENT_TRANSPORT_RETRY_DELAYS_MS;
+      const retryDelayMs = retryDelaysMs[attempt];
+      if ((!isRateLimit && !isTransientTransport) || retryDelayMs === undefined) {
         throw error;
       }
 
-      logger.warn(
-        `RPC rate limit for ${label}; retrying in ${retryDelayMs}ms (${attempt + 1}/${RPC_RATE_LIMIT_RETRY_DELAYS_MS.length}).`,
-      );
-      limiter.penalize(retryDelayMs);
+      if (isRateLimit) {
+        logger.warn(
+          `RPC rate limit for ${label}; retrying in ${retryDelayMs}ms (${attempt + 1}/${retryDelaysMs.length}).`,
+        );
+        limiter.penalize(retryDelayMs);
+      } else {
+        logger.warn(
+          `Transient RPC transport failure for ${label}; retrying in ${retryDelayMs}ms ` +
+            `(${attempt + 1}/${retryDelaysMs.length}).`,
+          error,
+        );
+      }
       await sleep(retryDelayMs);
     }
   }
