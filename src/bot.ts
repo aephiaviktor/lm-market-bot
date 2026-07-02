@@ -66,6 +66,8 @@ const MARKET_LEADER_CACHE_TTL_MS = 600000;
 const OPEN_ORDERS_CACHE_TTL_MS = 60000;
 const STATUS_SNAPSHOT_CACHE_FLOOR_MS = 120000;
 const STATUS_SNAPSHOT_CACHE_CEIL_MS = 600000;
+const FAST_CYCLE_INTERVAL_MS = 10 * 60_000;
+const SLOW_CYCLE_INTERVAL_MS = 60 * 60_000;
 const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
 const RPC_LATEST_BLOCKHASH_REUSE_MS = 45000;
 const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
@@ -854,7 +856,21 @@ export type BotRecentActivity = {
   price?: number;
   quantity?: number;
   remaining?: number;
+  rulesChecked?: number;
+  changes?: number;
+  skips?: number;
+  errors?: number;
+  nextDelayMinutes?: number;
   tx?: string;
+};
+
+type CycleStats = {
+  rulesChecked: number;
+  loggedEvents: number;
+  changes: number;
+  skips: number;
+  errors: number;
+  retryableSkips: number;
 };
 
 export type BotRuleHealthStatus = {
@@ -881,6 +897,7 @@ export type BotStatusSnapshot = {
   lastCycleStartedAt: string | null;
   lastCycleCompletedAt: string | null;
   lastCycleDurationMs: number | null;
+  nextCycleDelayMinutes: number | null;
   trackedAssetCount: number;
   activeRuleCount: number;
   openOrders: BotOpenOrderStatus[];
@@ -1755,6 +1772,7 @@ export class LmMarketBot {
   private lastCycleStartedAt: string | null = null;
   private lastCycleCompletedAt: string | null = null;
   private lastCycleDurationMs: number | null = null;
+  private nextCycleDelayMinutes: number | null = null;
   private readonly passiveOpenOrdersCache = new Map<string, BotOpenOrderStatus[]>();
   private readonly marketLeaderCache = new Map<string, MarketLeaderCacheEntry>();
   private marketLeaderThresholdsCache: MarketLeaderThresholdsCacheEntry | null = null;
@@ -1767,6 +1785,8 @@ export class LmMarketBot {
   private readonly cargoPodTokenInventoryCache = new Map<string, CargoPodTokenInventoryCacheEntry>();
   private solBalanceCache: ExpiringPromiseCacheEntry<number> | null = null;
   private statusSnapshotCache: { expiresAt: number; snapshot: BotStatusSnapshot } | null = null;
+  private currentCycleStats: CycleStats | null = null;
+  private consecutiveNoChangeCycles = 0;
   private transactionSubmissionQueue: Promise<void> = Promise.resolve();
   private nextTransactionSubmitAtMs = 0;
 
@@ -1938,6 +1958,7 @@ export class LmMarketBot {
       lastCycleStartedAt: this.lastCycleStartedAt,
       lastCycleCompletedAt: this.lastCycleCompletedAt,
       lastCycleDurationMs: this.lastCycleDurationMs,
+      nextCycleDelayMinutes: this.nextCycleDelayMinutes,
       trackedAssetCount: this.trackedResources.length,
       activeRuleCount: this.config.assetRules.length,
       openOrders,
@@ -2506,6 +2527,43 @@ export class LmMarketBot {
   private async appendLog(event: Record<string, unknown>) {
     const payload = { timestamp: new Date().toISOString(), ...event };
     await fs.appendFile(this.logFilePath, JSON.stringify(payload) + '\n', 'utf8');
+    this.trackCycleLogEvent(event);
+  }
+
+  private trackCycleLogEvent(event: Record<string, unknown>) {
+    if (!this.currentCycleStats) {
+      return;
+    }
+
+    const eventName = String(event.event ?? '');
+    if (eventName === 'CYCLE_OK' || eventName === 'NO_CHANGES') {
+      return;
+    }
+
+    this.currentCycleStats.loggedEvents += 1;
+    if (eventName === 'ERROR' || eventName.endsWith('_FAILED')) {
+      this.currentCycleStats.errors += 1;
+      return;
+    }
+
+    if (
+      eventName === 'PLACE' ||
+      eventName === 'CANCEL' ||
+      eventName === 'CANCEL_ACTIVE_ORDER' ||
+      eventName === 'MINT_CERTIFICATES' ||
+      eventName === 'REDEEM_CERTIFICATES' ||
+      eventName === 'FILLED'
+    ) {
+      this.currentCycleStats.changes += 1;
+      return;
+    }
+
+    if (eventName.startsWith('SKIP_') || eventName.includes('_SKIP_') || eventName.startsWith('CANCEL_NO_')) {
+      this.currentCycleStats.skips += 1;
+      if (event.retryable === true || eventName === 'SKIP_LOCAL_MARKET_CONTEXT') {
+        this.currentCycleStats.retryableSkips += 1;
+      }
+    }
   }
 
   private async setLastWalletBalance(resource: ResourceConfig, side: AssetRuleSide, balance: number) {
@@ -3841,6 +3899,42 @@ export class LmMarketBot {
     }
   }
 
+  private getNextCycleDelayMs(stats: CycleStats): number {
+    const baseDelayMs = this.checkIntervalMs;
+    const hasUrgentFollowUp = stats.changes > 0 || stats.errors > 0 || stats.retryableSkips > 0;
+    if (hasUrgentFollowUp) {
+      return Math.min(baseDelayMs, FAST_CYCLE_INTERVAL_MS);
+    }
+
+    const cleanNoChange = stats.loggedEvents === 0 && stats.changes === 0 && stats.skips === 0 && stats.errors === 0;
+    if (cleanNoChange) {
+      this.consecutiveNoChangeCycles += 1;
+      return this.consecutiveNoChangeCycles >= 1 ? Math.max(baseDelayMs, SLOW_CYCLE_INTERVAL_MS) : baseDelayMs;
+    }
+
+    this.consecutiveNoChangeCycles = 0;
+    return baseDelayMs;
+  }
+
+  private async appendCycleCompletionLog(stats: CycleStats, nextDelayMs: number, durationMs: number) {
+    const cleanNoChange = stats.loggedEvents === 0 && stats.changes === 0 && stats.skips === 0 && stats.errors === 0;
+    const nextDelayMinutes = Math.max(1, Math.round(nextDelayMs / 60_000));
+
+    await this.appendLog({
+      event: cleanNoChange ? 'NO_CHANGES' : 'CYCLE_OK',
+      rulesChecked: stats.rulesChecked,
+      changes: stats.changes,
+      skips: stats.skips,
+      errors: stats.errors,
+      retryableSkips: stats.retryableSkips,
+      durationMs,
+      nextDelayMinutes,
+      message: cleanNoChange
+        ? `No order changes. Next check in ${nextDelayMinutes}m.`
+        : `Cycle completed. Next check in ${nextDelayMinutes}m.`,
+    });
+  }
+
   private async buildOpenOrdersSnapshot(): Promise<BotOpenOrderStatus[]> {
     const result: BotOpenOrderStatus[] = [];
     const now = new Date().toISOString();
@@ -4075,6 +4169,28 @@ export class LmMarketBot {
     for (const [marketKey, mintOrders] of byMarket.entries()) {
       const cached = this.marketLeaderCache.get(marketKey);
       if (!cached || Date.now() >= cached.expiresAt) {
+        const visibleBuyPrices = mintOrders.filter((order) => order.side === 'buy').map((order) => order.price);
+        const visibleSellPrices = mintOrders.filter((order) => order.side === 'sell').map((order) => order.price);
+        const visibleBestBuyPrice = visibleBuyPrices.length ? Math.max(...visibleBuyPrices) : null;
+        const visibleBestSellPrice = visibleSellPrices.length ? Math.min(...visibleSellPrices) : null;
+
+        for (const order of mintOrders) {
+          if (
+            order.side === 'buy' &&
+            visibleBestBuyPrice !== null &&
+            Math.abs(order.price - visibleBestBuyPrice) < ORDER_PRICE_EPSILON
+          ) {
+            order.marketLeader = 'hb';
+          }
+
+          if (
+            order.side === 'sell' &&
+            visibleBestSellPrice !== null &&
+            Math.abs(order.price - visibleBestSellPrice) < ORDER_PRICE_EPSILON
+          ) {
+            order.marketLeader = 'ba';
+          }
+        }
         continue;
       }
 
@@ -4347,24 +4463,39 @@ export class LmMarketBot {
 
     const start = Date.now();
     this.lastCycleStartedAt = new Date(start).toISOString();
+    const stats: CycleStats = {
+      rulesChecked: this.config.assetRules.length > 0 ? this.config.assetRules.length : this.legacyResources.length,
+      loggedEvents: 0,
+      changes: 0,
+      skips: 0,
+      errors: 0,
+      retryableSkips: 0,
+    };
+    this.currentCycleStats = stats;
 
     try {
       await this.runCycle();
     } catch (err) {
       this.logger.error('Cycle failed:', err);
       await this.appendLog({ event: 'ERROR', message: (err as Error).message });
+    } finally {
+      this.currentCycleStats = null;
     }
 
     const end = Date.now();
     this.lastCycleCompletedAt = new Date(end).toISOString();
     this.lastCycleDurationMs = end - start;
+    const nextDelayMs = this.getNextCycleDelayMs(stats);
+    this.nextCycleDelayMinutes = Math.max(1, Math.round(nextDelayMs / 60_000));
+    await this.appendCycleCompletionLog(stats, nextDelayMs, this.lastCycleDurationMs);
+    this.invalidateStatusSnapshotCache();
 
     if (!this.running) {
       return;
     }
 
     const elapsed = end - start;
-    const delay = Math.max(0, this.checkIntervalMs - elapsed);
+    const delay = Math.max(0, nextDelayMs - elapsed);
     this.loopTimer = setTimeout(() => {
       void this.loop();
     }, delay);

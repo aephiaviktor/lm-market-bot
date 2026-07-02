@@ -1024,6 +1024,12 @@ function getActivityTitle(entry) {
   if (entry.event === 'START') {
     return 'Bot Start';
   }
+  if (entry.event === 'NO_CHANGES') {
+    return 'No Changes';
+  }
+  if (entry.event === 'CYCLE_OK') {
+    return 'Cycle Complete';
+  }
   if (entry.event === 'FILLED') {
     return ['FILLED', entry.resource || entry.asset || ''].filter(Boolean).join(' · ');
   }
@@ -1079,6 +1085,21 @@ function renderRecentActivity(items) {
     }
     if (typeof entry.remaining === 'number') {
       details.push(`R ${formatNumber(entry.remaining, 0)}`);
+    }
+    if (typeof entry.rulesChecked === 'number') {
+      details.push(`${entry.rulesChecked} rules`);
+    }
+    if (typeof entry.changes === 'number') {
+      details.push(`${entry.changes} changes`);
+    }
+    if (typeof entry.skips === 'number') {
+      details.push(`${entry.skips} skips`);
+    }
+    if (typeof entry.errors === 'number') {
+      details.push(`${entry.errors} errors`);
+    }
+    if (typeof entry.nextDelayMinutes === 'number') {
+      details.push(`next ${entry.nextDelayMinutes}m`);
     }
     if (entry.message) {
       details.push(entry.message);
@@ -1206,9 +1227,14 @@ function renderStatusSnapshot(snapshot) {
   lastCycleAtEl.textContent = formatTimestamp(snapshot?.lastCycleCompletedAt || snapshot?.lastCycleStartedAt);
 
   if (nextCycleInEl) {
-    const intervalMinutes = Number(
+    const dynamicIntervalMinutes = Number(snapshot?.nextCycleDelayMinutes ?? NaN);
+    const configuredIntervalMinutes = Number(
       form?.elements?.namedItem('CHECK_INTERVAL_MINUTES')?.value ?? snapshot?.checkIntervalMinutes ?? NaN
     );
+    const intervalMinutes =
+      Number.isFinite(dynamicIntervalMinutes) && dynamicIntervalMinutes > 0
+        ? dynamicIntervalMinutes
+        : configuredIntervalMinutes;
     const baseAt = snapshot?.lastCycleStartedAt || snapshot?.lastCycleCompletedAt || snapshot?.startedAt;
     const baseMs = baseAt ? new Date(baseAt).getTime() : Number.NaN;
 
