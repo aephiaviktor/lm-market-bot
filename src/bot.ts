@@ -682,6 +682,15 @@ type DesiredBuyOrder = {
   quoteSymbol: 'ATLAS' | 'USDC';
 };
 
+type DesiredSellOrder = {
+  rule: AssetRuleConfig;
+  ruleIndex: number;
+  targetPrice: number;
+  targetQuantity: number;
+  minSellQuantity: number;
+  quoteSymbol: 'ATLAS' | 'USDC';
+};
+
 type OrderSnapshot = {
   price: number;
   remaining: number;
@@ -3461,6 +3470,251 @@ export class LmMarketBot {
     );
   }
 
+  private async processSellRules(
+    rules: Array<{ index: number; rule: AssetRuleConfig }>,
+    resource: ResourceConfig,
+    quoteMintOverride?: PublicKey,
+  ) {
+    this.logger.info(`[${new Date().toISOString()}] Checking ${resource.name} sell market for ${rules.length} rules...`);
+    const cancelledIds = new Set<string>();
+    const firstRule = rules[0].rule;
+    const localMarketContext = await this.resolveLocalMarketSellContext(firstRule, resource);
+    const sellResource = localMarketContext?.certificateResource ?? resource;
+    const sellDepositTokenAccount = localMarketContext?.certificateTokenAccount;
+    const { allOrdersRaw, myOrdersRaw } = await this.readMarketOrderSnapshot(sellResource);
+
+    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(sellResource);
+    const quoteSymbol = getQuoteSymbolForMint(quoteMint);
+    const allOrders = allOrdersRaw.filter((o) => o.orderType === OrderSide.Sell && isOrderForQuoteMint(o, quoteMint));
+    const myOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Sell && isOrderForQuoteMint(o, quoteMint));
+    const staleQuoteOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Sell && !isOrderForQuoteMint(o, quoteMint));
+
+    for (const staleOrder of staleQuoteOrders) {
+      await this.cancelOrder(staleOrder, sellResource, 'sell', cancelledIds);
+    }
+
+    await this.detectFills(sellResource, 'sell', myOrders, cancelledIds);
+
+    let walletAvailableQuantity = Math.max(
+      0,
+      Math.floor(
+        await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
+          tokenProgramId: localMarketContext ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
+        }),
+      ),
+    );
+    let cargoAvailableQuantity = Math.max(0, Math.floor((await this.getStarbaseCargoPodBalance(firstRule, resource)) ?? 0));
+
+    this.logger.info(`${resource.name} wallet sell availability: ${walletAvailableQuantity}`);
+    if (localMarketContext) {
+      this.logger.info(`${resource.name} starbase cargo inventory: ${cargoAvailableQuantity}`);
+    } else if (cargoAvailableQuantity > 0) {
+      this.logger.warn(
+        `${resource.name} starbase cargo inventory exists (${cargoAvailableQuantity}) but local-market sell context is unavailable. ` +
+          'Skipping this cycle and retrying later.',
+      );
+      await this.appendLog({
+        event: 'SKIP_LOCAL_MARKET_CONTEXT',
+        side: 'sell',
+        asset: firstRule.asset,
+        resource: resource.name,
+        mint: resource.mint.toBase58(),
+        cargoBalance: cargoAvailableQuantity,
+        inventorySource: 'starbase-cargo-pod',
+        retryable: true,
+        message:
+          'Starbase cargo exists, but the bot could not resolve the certificate/local-market context needed to mint and sell it.',
+      });
+      return;
+    }
+
+    const desiredOrders: DesiredSellOrder[] = rules.map(({ index, rule }) => {
+      const minSellQuantity = rule.quantity;
+      const targetQuantity = Math.floor(rule.limit ?? rule.quantity);
+      const relevantSellQuantity = getRelevantOrderThreshold(minSellQuantity, this.config.relevantSellOrderPct);
+      const targetPrice =
+        targetQuantity >= minSellQuantity
+          ? this.getTargetSellPrice(allOrders, rule.price, relevantSellQuantity, rule.maxPrice)
+          : rule.price;
+
+      return {
+        rule,
+        ruleIndex: index,
+        targetPrice,
+        targetQuantity,
+        minSellQuantity,
+        quoteSymbol,
+      };
+    });
+
+    const activeOrders = [...myOrders].sort((a, b) => {
+      const priceCompare = a.uiPrice - b.uiPrice;
+      if (Math.abs(priceCompare) >= ORDER_PRICE_EPSILON) {
+        return priceCompare;
+      }
+      const quantityCompare = getOrderRemainingQuantity(a) - getOrderRemainingQuantity(b);
+      if (quantityCompare !== 0) {
+        return quantityCompare;
+      }
+      return a.id.localeCompare(b.id);
+    });
+    const matchedOrderIds = new Set<string>();
+    const matches = new Map<number, Order>();
+
+    const findBestMatch = (desired: DesiredSellOrder): Order | undefined => {
+      const candidates = activeOrders.filter((order) => !matchedOrderIds.has(order.id));
+      if (candidates.length === 0) {
+        return undefined;
+      }
+
+      const exactMatch = candidates.find(
+        (order) =>
+          Math.abs(order.uiPrice - desired.targetPrice) < ORDER_PRICE_EPSILON &&
+          getOrderRemainingQuantity(order) === desired.targetQuantity,
+      );
+      if (exactMatch) {
+        return exactMatch;
+      }
+
+      return candidates.sort((a, b) => {
+        const aPriceDelta = Math.abs(a.uiPrice - desired.targetPrice);
+        const bPriceDelta = Math.abs(b.uiPrice - desired.targetPrice);
+        if (Math.abs(aPriceDelta - bPriceDelta) >= ORDER_PRICE_EPSILON) {
+          return aPriceDelta - bPriceDelta;
+        }
+        return (
+          Math.abs(getOrderRemainingQuantity(a) - desired.targetQuantity) -
+          Math.abs(getOrderRemainingQuantity(b) - desired.targetQuantity)
+        );
+      })[0];
+    };
+
+    for (const desired of desiredOrders) {
+      if (desired.targetQuantity < desired.minSellQuantity) {
+        continue;
+      }
+      const match = findBestMatch(desired);
+      if (match) {
+        matchedOrderIds.add(match.id);
+        matches.set(desired.ruleIndex, match);
+      }
+    }
+
+    this.logger.info(`Planning ${desiredOrders.length} sell order(s) for ${resource.name}.`);
+
+    for (const order of activeOrders) {
+      if (matchedOrderIds.has(order.id)) {
+        continue;
+      }
+
+      const releasedQuantity = getOrderRemainingQuantity(order);
+      this.logger.info(`Cancelling extra sell order ${order.id} for ${resource.name}.`);
+      const cancelTx = await this.cancelOrder(order, sellResource, 'sell', cancelledIds);
+      if (cancelTx) {
+        walletAvailableQuantity += releasedQuantity;
+      }
+    }
+
+    for (const desired of desiredOrders) {
+      const activeOrder = matches.get(desired.ruleIndex);
+
+      if (desired.targetQuantity < desired.minSellQuantity) {
+        this.logger.info(
+          `Sell rule ${desired.ruleIndex} for ${resource.name} is below minimum quantity ${desired.minSellQuantity}.`,
+        );
+        if (activeOrder) {
+          const releasedQuantity = getOrderRemainingQuantity(activeOrder);
+          const cancelTx = await this.cancelOrder(activeOrder, sellResource, 'sell', cancelledIds);
+          if (cancelTx) {
+            walletAvailableQuantity += releasedQuantity;
+          }
+        }
+        continue;
+      }
+
+      this.logger.info(
+        `Rule ${desired.ruleIndex}: sell ${desired.targetQuantity} ${resource.name} at min ${desired.rule.price} ${desired.quoteSymbol} (target ${desired.targetPrice}).`,
+      );
+
+      const activeQuantity = activeOrder ? getOrderRemainingQuantity(activeOrder) : 0;
+      const priceDelta = activeOrder ? Math.abs(activeOrder.uiPrice - desired.targetPrice) : Number.POSITIVE_INFINITY;
+      const quantityChanged = activeQuantity !== desired.targetQuantity;
+
+      if (activeOrder && !quantityChanged && priceDelta < ORDER_PRICE_EPSILON) {
+        this.logger.info(
+          `Sell order ${activeOrder.id} already matches rule ${desired.ruleIndex} at ${activeOrder.uiPrice} and quantity ${activeQuantity}.`,
+        );
+        continue;
+      }
+
+      if (activeOrder) {
+        this.logger.info(
+          `Replacing sell order ${activeOrder.id} for rule ${desired.ruleIndex} with ` +
+            `${desired.targetQuantity} ${resource.name} @ ${desired.targetPrice}.`,
+        );
+        const cancelTx = await this.cancelOrder(activeOrder, sellResource, 'sell', cancelledIds);
+        if (!cancelTx) {
+          await this.appendLog({
+            event: 'REPLACE_SKIP_UNCANCELLED_TOKEN_2022',
+            side: 'sell',
+            ruleIndex: desired.ruleIndex,
+            asset: desired.rule.asset,
+            resource: sellResource.name,
+            mint: sellResource.mint.toBase58(),
+            targetPrice: desired.targetPrice,
+            nextQuantity: desired.targetQuantity,
+            activeQuantity,
+            walletAvailableQuantity,
+            orderIds: [activeOrder.id],
+            message: 'Skipped replacement because cancel did not release the existing order quantity.',
+          });
+          continue;
+        }
+        walletAvailableQuantity += activeQuantity;
+      }
+
+      const totalAvailableQuantity = walletAvailableQuantity + (localMarketContext ? cargoAvailableQuantity : 0);
+      if (totalAvailableQuantity < desired.targetQuantity) {
+        this.logger.info(
+          `Insufficient ${resource.name} inventory to place sell order for rule ${desired.ruleIndex}: ` +
+            `${desired.targetQuantity} needed, ${totalAvailableQuantity} available.`,
+        );
+        await this.appendLog({
+          event: 'SKIP_NO_INVENTORY',
+          side: 'sell',
+          ruleIndex: desired.ruleIndex,
+          asset: desired.rule.asset,
+          resource: sellResource.name,
+          mint: sellResource.mint.toBase58(),
+          balance: walletAvailableQuantity,
+          cargoBalance: cargoAvailableQuantity,
+          minSellQuantity: desired.minSellQuantity,
+          quantity: desired.targetQuantity,
+          inventorySource: localMarketContext ? 'starbase-cargo-pod' : 'wallet',
+        });
+        continue;
+      }
+
+      if (localMarketContext && walletAvailableQuantity < desired.targetQuantity) {
+        const certificateQuantity = desired.targetQuantity - walletAvailableQuantity;
+        this.logger.info(`Minting ${certificateQuantity} ${resource.name} local-market certificates before sell order.`);
+        await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
+        walletAvailableQuantity += certificateQuantity;
+        cargoAvailableQuantity = Math.max(0, cargoAvailableQuantity - certificateQuantity);
+      }
+
+      await this.placeOrder(sellResource, 'sell', desired.targetPrice, desired.targetQuantity, cancelledIds, quoteMint, sellDepositTokenAccount);
+      walletAvailableQuantity = Math.max(0, walletAvailableQuantity - desired.targetQuantity);
+    }
+
+    const postPlacementBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
+      refresh: true,
+      tokenProgramId: localMarketContext ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID,
+    });
+    await this.setLastWalletBalance(sellResource, 'sell', postPlacementBalance);
+    this.logger.info(`Stored sell wallet baseline for ${resource.name}: ${postPlacementBalance}`);
+  }
+
   private async processBuyRule(
     rule: AssetRuleConfig,
     index: number,
@@ -3822,16 +4076,7 @@ export class LmMarketBot {
     const marketOrderSnapshot = hasRunnableBuyRule ? await this.readMarketOrderSnapshot(resource) : undefined;
 
     if (sellRules.length > 1) {
-      const ruleIndexes = sellRules.map((item) => item.index);
-      const message = `Duplicate sell rules for ${resource.name}, skipping sell side`;
-      this.logger.error(message);
-      await this.appendLog({
-        event: 'SKIP_DUPLICATE_SELL_RULES',
-        asset,
-        resource: resource.name,
-        mint: resource.mint.toBase58(),
-        ruleIndexes,
-      });
+      await this.processSellRules(sellRules, resource, quoteMint);
     } else if (sellRules.length === 1) {
       const sellRule = sellRules[0];
       await this.processSellRule(
@@ -4053,7 +4298,7 @@ export class LmMarketBot {
         queryResource = context?.certificateResource ?? rawResource;
       }
 
-      const key = `${queryResource.mint.toBase58()}:${rule.side}:${index}`;
+      const key = `${normalizeStarbaseName(rule.starbase)}:${queryResource.mint.toBase58()}:${rule.side}`;
       if (seen.has(key)) {
         continue;
       }
@@ -4088,12 +4333,13 @@ export class LmMarketBot {
             thresholds.set(mintKey, current);
           }
 
-          const sellRule = group.rules.find((item) => item.rule.side === 'sell')?.rule;
-          if (sellRule) {
+          const sellRules = group.rules.filter((item) => item.rule.side === 'sell');
+          for (const { rule: sellRule } of sellRules) {
             const sellContext = await this.resolveLocalMarketSellContext(sellRule, resource);
             const mintKey = (sellContext?.certificateResource ?? resource).mint.toBase58();
             const current = thresholds.get(mintKey) ?? { buy: 1, sell: 1 };
-            current.sell = getRelevantOrderThreshold(sellRule.quantity, this.config.relevantSellOrderPct);
+            const sellThreshold = getRelevantOrderThreshold(sellRule.quantity, this.config.relevantSellOrderPct);
+            current.sell = current.sell === 1 ? sellThreshold : Math.min(current.sell, sellThreshold);
             thresholds.set(mintKey, current);
           }
         } catch {
@@ -4413,30 +4659,39 @@ export class LmMarketBot {
           }
         }
 
-        if (sellRules.length > 1) {
-          result.push({
-            asset: group.asset,
-            side: 'sell',
-            configuredQuantity: null,
-            configuredPrice: null,
-            status: 'duplicate',
-            note: `Duplicate sell rules (${sellRules.length})`,
-          });
-        } else if (sellRules.length === 1) {
-          const rule = sellRules[0].rule;
-          const openOrder = findActiveOrder(group.asset, 'sell');
-          result.push({
-            asset: group.asset,
-            side: 'sell',
-            configuredQuantity: rule.quantity,
-            configuredPrice: rule.price,
-            status: openOrder ? 'active' : 'idle',
-            openOrderId: openOrder?.id,
-            openOrderPrice: openOrder?.price,
-            openOrderRemaining: openOrder?.remaining,
-            partiallyFilled: openOrder?.partiallyFilled,
-            note: openOrder ? 'Sell order currently tracked' : 'No active sell order tracked',
-          });
+        if (sellRules.length > 0) {
+          const availableSellOrders = openOrders
+            .filter((order) => normalizeAssetKey(order.asset) === normalizeAssetKey(group.asset) && order.side === 'sell')
+            .sort((a, b) => a.price - b.price);
+
+          for (const item of sellRules) {
+            const rule = item.rule;
+            const openOrder =
+              sellRules.length > 1
+                ? consumeBestOrder(availableSellOrders, rule)
+                : findActiveOrder(group.asset, 'sell');
+            const note =
+              sellRules.length > 1
+                ? openOrder
+                  ? `Sell rule ${item.index} currently tracked`
+                  : `No active sell order tracked for rule ${item.index}`
+                : openOrder
+                  ? 'Sell order currently tracked'
+                  : 'No active sell order tracked';
+
+            result.push({
+              asset: group.asset,
+              side: 'sell',
+              configuredQuantity: rule.quantity,
+              configuredPrice: rule.price,
+              status: openOrder ? 'active' : 'idle',
+              openOrderId: openOrder?.id,
+              openOrderPrice: openOrder?.price,
+              openOrderRemaining: openOrder?.remaining,
+              partiallyFilled: openOrder?.partiallyFilled,
+              note,
+            });
+          }
         }
       }
 
