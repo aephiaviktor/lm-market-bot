@@ -3339,9 +3339,15 @@ export class LmMarketBot {
     const refillEnabled = rule?.refill !== false;
     const shouldResizeForAvailableInventory = refillEnabled && (addableAvailableQuantity >= minSellQuantity || canTopUpToSellLimit);
     const shouldResizeForLimit = typeof limit === 'number' && activeQuantity > limit;
+    const shouldResizeToConfiguredLimit =
+      typeof limit === 'number' &&
+      activeQuantity < limit &&
+      shouldResizeForAvailableInventory &&
+      addableAvailableQuantity > 0;
     const shouldReplaceForPrice = sortedMyOrders.some((order) => Math.abs(order.uiPrice - targetPrice) >= ORDER_PRICE_EPSILON);
     const shouldConsolidateOrders = sortedMyOrders.length > 1;
-    const canTopUpWithoutCancelling = shouldResizeForAvailableInventory && !shouldResizeForLimit;
+    const canTopUpWithoutCancelling =
+      shouldResizeForAvailableInventory && !shouldResizeForLimit && !shouldResizeToConfiguredLimit;
 
     if (canTopUpWithoutCancelling) {
       const topUpQuantity = addableAvailableQuantity;
@@ -3377,7 +3383,7 @@ export class LmMarketBot {
       return;
     }
 
-    if (shouldResizeForLimit || shouldReplaceForPrice || shouldConsolidateOrders) {
+    if (shouldResizeForLimit || shouldResizeToConfiguredLimit || shouldReplaceForPrice || shouldConsolidateOrders) {
       const nextQuantity = shouldResizeForLimit
         ? limit ?? activeQuantity
         : shouldResizeForAvailableInventory
