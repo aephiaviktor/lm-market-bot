@@ -688,6 +688,7 @@ type DesiredSellOrder = {
   targetPrice: number;
   targetQuantity: number;
   minSellQuantity: number;
+  refillEnabled: boolean;
   quoteSymbol: 'ATLAS' | 'USDC';
 };
 
@@ -3252,6 +3253,7 @@ export class LmMarketBot {
     const cargoSellBalance = rule ? await this.getStarbaseCargoPodBalance(rule, resource) : null;
     const relevantSellQuantity = getRelevantOrderThreshold(minSellQuantity, this.config.relevantSellOrderPct);
     const targetPrice = this.getTargetSellPrice(allOrders, minPrice, relevantSellQuantity, rule?.maxPrice);
+    const refillEnabled = rule?.refill !== false;
 
     this.logger.info(`${resource.name} wallet sell availability: ${walletSellBalance}`);
     if (cargoSellBalance !== null) {
@@ -3290,6 +3292,23 @@ export class LmMarketBot {
     const activeOrder = sortedMyOrders[0];
 
     if (!activeOrder) {
+      if (!refillEnabled) {
+        this.logger.info(`Refill disabled for ${resource.name} sell rule and no active order exists. Skipping new sell order.`);
+        await this.appendLog({
+          event: 'SKIP_REFILL_DISABLED',
+          side: 'sell',
+          asset: rule?.asset,
+          resource: sellResource.name,
+          mint: sellResource.mint.toBase58(),
+          balance: walletSellBalance,
+          cargoBalance: cargoSellBalance ?? undefined,
+          minSellQuantity,
+          inventorySource: localMarketContext ? 'starbase-cargo-pod' : 'wallet',
+          message: 'Refill is disabled for this sell rule, so the bot will not create a new sell order.',
+        });
+        return;
+      }
+
       const availableToSell = Math.min(
         Math.floor(walletSellBalance + (localMarketContext ? cargoSellBalance ?? 0 : 0)),
         limit ?? Number.POSITIVE_INFINITY,
@@ -3345,7 +3364,6 @@ export class LmMarketBot {
       typeof limit === 'number' &&
       remainingSellAllowance > 0 &&
       freeAvailableQuantity >= remainingSellAllowance;
-    const refillEnabled = rule?.refill !== false;
     const shouldResizeForAvailableInventory = refillEnabled && (addableAvailableQuantity >= minSellQuantity || canTopUpToSellLimit);
     const shouldResizeForLimit = typeof limit === 'number' && activeQuantity > limit;
     const shouldResizeToConfiguredLimit =
@@ -3543,6 +3561,7 @@ export class LmMarketBot {
         targetPrice,
         targetQuantity,
         minSellQuantity,
+        refillEnabled: rule.refill !== false,
         quoteSymbol,
       };
     });
@@ -3639,6 +3658,8 @@ export class LmMarketBot {
       const activeQuantity = activeOrder ? getOrderRemainingQuantity(activeOrder) : 0;
       const priceDelta = activeOrder ? Math.abs(activeOrder.uiPrice - desired.targetPrice) : Number.POSITIVE_INFINITY;
       const quantityChanged = activeQuantity !== desired.targetQuantity;
+      const nextQuantity =
+        desired.refillEnabled || activeQuantity > desired.targetQuantity ? desired.targetQuantity : activeQuantity;
 
       if (activeOrder && !quantityChanged && priceDelta < ORDER_PRICE_EPSILON) {
         this.logger.info(
@@ -3647,10 +3668,39 @@ export class LmMarketBot {
         continue;
       }
 
+      if (!desired.refillEnabled && !activeOrder) {
+        this.logger.info(
+          `Refill disabled for sell rule ${desired.ruleIndex} and no active order exists. Skipping new sell order.`,
+        );
+        await this.appendLog({
+          event: 'SKIP_REFILL_DISABLED',
+          side: 'sell',
+          ruleIndex: desired.ruleIndex,
+          asset: desired.rule.asset,
+          resource: sellResource.name,
+          mint: sellResource.mint.toBase58(),
+          balance: walletAvailableQuantity,
+          cargoBalance: cargoAvailableQuantity,
+          minSellQuantity: desired.minSellQuantity,
+          quantity: desired.targetQuantity,
+          inventorySource: localMarketContext ? 'starbase-cargo-pod' : 'wallet',
+          message: 'Refill is disabled for this sell rule, so the bot will not create a new sell order.',
+        });
+        continue;
+      }
+
+      if (!desired.refillEnabled && activeOrder && activeQuantity < desired.targetQuantity && priceDelta < ORDER_PRICE_EPSILON) {
+        this.logger.info(
+          `Sell order ${activeOrder.id} already matches rule ${desired.ruleIndex} price and refill is disabled, ` +
+            `so keeping existing quantity ${activeQuantity} instead of topping up to ${desired.targetQuantity}.`,
+        );
+        continue;
+      }
+
       if (activeOrder) {
         this.logger.info(
           `Replacing sell order ${activeOrder.id} for rule ${desired.ruleIndex} with ` +
-            `${desired.targetQuantity} ${resource.name} @ ${desired.targetPrice}.`,
+            `${nextQuantity} ${resource.name} @ ${desired.targetPrice}.`,
         );
         const cancelTx = await this.cancelOrder(activeOrder, sellResource, 'sell', cancelledIds);
         if (!cancelTx) {
@@ -3662,7 +3712,7 @@ export class LmMarketBot {
             resource: sellResource.name,
             mint: sellResource.mint.toBase58(),
             targetPrice: desired.targetPrice,
-            nextQuantity: desired.targetQuantity,
+            nextQuantity,
             activeQuantity,
             walletAvailableQuantity,
             orderIds: [activeOrder.id],
@@ -3674,10 +3724,10 @@ export class LmMarketBot {
       }
 
       const totalAvailableQuantity = walletAvailableQuantity + (localMarketContext ? cargoAvailableQuantity : 0);
-      if (totalAvailableQuantity < desired.targetQuantity) {
+      if (totalAvailableQuantity < nextQuantity) {
         this.logger.info(
           `Insufficient ${resource.name} inventory to place sell order for rule ${desired.ruleIndex}: ` +
-            `${desired.targetQuantity} needed, ${totalAvailableQuantity} available.`,
+            `${nextQuantity} needed, ${totalAvailableQuantity} available.`,
         );
         await this.appendLog({
           event: 'SKIP_NO_INVENTORY',
@@ -3689,22 +3739,22 @@ export class LmMarketBot {
           balance: walletAvailableQuantity,
           cargoBalance: cargoAvailableQuantity,
           minSellQuantity: desired.minSellQuantity,
-          quantity: desired.targetQuantity,
+          quantity: nextQuantity,
           inventorySource: localMarketContext ? 'starbase-cargo-pod' : 'wallet',
         });
         continue;
       }
 
-      if (localMarketContext && walletAvailableQuantity < desired.targetQuantity) {
-        const certificateQuantity = desired.targetQuantity - walletAvailableQuantity;
+      if (localMarketContext && walletAvailableQuantity < nextQuantity) {
+        const certificateQuantity = nextQuantity - walletAvailableQuantity;
         this.logger.info(`Minting ${certificateQuantity} ${resource.name} local-market certificates before sell order.`);
         await this.mintLocalMarketCertificates(localMarketContext, certificateQuantity);
         walletAvailableQuantity += certificateQuantity;
         cargoAvailableQuantity = Math.max(0, cargoAvailableQuantity - certificateQuantity);
       }
 
-      await this.placeOrder(sellResource, 'sell', desired.targetPrice, desired.targetQuantity, cancelledIds, quoteMint, sellDepositTokenAccount);
-      walletAvailableQuantity = Math.max(0, walletAvailableQuantity - desired.targetQuantity);
+      await this.placeOrder(sellResource, 'sell', desired.targetPrice, nextQuantity, cancelledIds, quoteMint, sellDepositTokenAccount);
+      walletAvailableQuantity = Math.max(0, walletAvailableQuantity - nextQuantity);
     }
 
     const postPlacementBalance = await this.getWalletBalanceForMint(sellResource.mint, sellResource.name, {
