@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('botApi', {
   applyRunningSettings: (payload) => ipcRenderer.invoke('bot:apply-running-settings', payload),
   cancelOrder: (payload) => ipcRenderer.invoke('bot:cancel-order', payload),
   redeemCertificate: (payload) => ipcRenderer.invoke('bot:redeem-certificate', payload),
+  getCrewDepositStatus: () => ipcRenderer.invoke('crew-deposit:status'),
+  depositCrew: (payload) => ipcRenderer.invoke('crew-deposit:run', payload),
   getBotStatus: () => ipcRenderer.invoke('bot:status'),
   rerunAssets: (assets) => ipcRenderer.invoke('bot:rerun-assets', assets),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),

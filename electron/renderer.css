@@ -932,8 +932,13 @@ select:focus {
 
 .actions {
   display: flex;
+  align-items: center;
   gap: 8px;
   margin-top: 12px;
+}
+
+.actions-spacer {
+  flex: 1 1 auto;
 }
 
 .rail-update-btn {
@@ -1021,6 +1026,38 @@ button:disabled {
   line-height: 1.45;
 }
 
+.deposit-crew-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.deposit-crew-summary > div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(143, 193, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(4, 16, 34, 0.62);
+}
+
+.deposit-crew-summary span {
+  display: block;
+  margin-bottom: 4px;
+  color: #9fc8ea;
+  font-size: 12px;
+}
+
+.deposit-crew-summary strong {
+  display: block;
+  color: #f4fbff;
+  font-size: 20px;
+}
+
+.deposit-crew-field {
+  margin-top: 4px;
+}
+
 .update-dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -1080,6 +1117,14 @@ button:disabled {
 
   .tab-button:last-child {
     margin-left: 0;
+  }
+
+  .actions-spacer {
+    display: none;
+  }
+
+  .deposit-crew-summary {
+    grid-template-columns: 1fr;
   }
 
   .balance-grid {

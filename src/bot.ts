@@ -917,6 +917,15 @@ export type BotStatusSnapshot = {
   ruleHealth: BotRuleHealthStatus[];
 };
 
+export type CrewDepositStatus = {
+  ok: boolean;
+  ready: boolean;
+  status: string;
+  batchSize: number;
+  availableCrew: number | null;
+  message?: string;
+};
+
 const defaultLogger: BotLogger = {
   info: (...args) => console.log(...args),
   warn: (...args) => console.warn(...args),
@@ -2231,6 +2240,97 @@ export class LmMarketBot {
     }
 
     return matchingIndex;
+  }
+
+  private async resolveOwnerManageCrewProfileKeyIndex(): Promise<number | null> {
+    const profile = new PublicKey(this.config.ownerProfile.trim());
+    const profileAccount = await this.connection.getAccountInfo(profile, 'confirmed');
+    if (!profileAccount || !profileAccount.owner.equals(PLAYER_PROFILE_PROGRAM_ID)) {
+      this.logger.warn('OWNER_PROFILE is not a valid Player Profile account; cannot deposit crew.');
+      return null;
+    }
+
+    const decodedProfile = PlayerProfile.decodeData(
+      { accountId: profile, accountInfo: profileAccount },
+      this.playerProfileProgram,
+    );
+    if (decodedProfile.type !== 'ok') {
+      this.logger.warn('Failed to decode OWNER_PROFILE account; cannot deposit crew.');
+      return null;
+    }
+
+    const matchingIndex = decodedProfile.data.profileKeys.findIndex(
+      (profileKey) => profileKey.key.equals(this.wallet.publicKey) && profileKey.scope.equals(SAGE_PROGRAM_ID),
+    );
+    if (matchingIndex < 0) {
+      this.logger.warn('Hot wallet is not an authorized SAGE key on OWNER_PROFILE; cannot deposit crew.');
+      return null;
+    }
+
+    const profileKey = decodedProfile.data.profileKeys[matchingIndex];
+    const permissions = SagePermissions.fromPermissions(profileKey.permissions);
+    if (!permissions.manageCrew) {
+      this.logger.warn('Hot wallet OWNER_PROFILE SAGE key is missing manageCrew permission; cannot deposit crew.');
+      return null;
+    }
+
+    return matchingIndex;
+  }
+
+  async getCrewDepositStatus(): Promise<CrewDepositStatus> {
+    const profileKeyIndex = await this.resolveOwnerManageCrewProfileKeyIndex();
+    if (profileKeyIndex === null) {
+      return {
+        ok: true,
+        ready: false,
+        status: 'missing_manage_crew_permission',
+        batchSize: 6,
+        availableCrew: null,
+        message: 'Hot wallet is not ready to deposit crew. Check OWNER_PROFILE SAGE manageCrew permission.',
+      };
+    }
+
+    return {
+      ok: true,
+      ready: false,
+      status: 'crew_discovery_not_connected',
+      batchSize: 6,
+      availableCrew: null,
+      message: 'manageCrew is ready. Crew cNFT discovery and Merkle proof fetching still need to be connected before deposits can run.',
+    };
+  }
+
+  async depositCrewToGame(count: number, batchSize = 6): Promise<{ ok: boolean; status: string; count: number; batchSize: number; message?: string }> {
+    const normalizedCount = Math.max(0, Math.floor(Number(count) || 0));
+    const normalizedBatchSize = Math.max(1, Math.floor(Number(batchSize) || 6));
+    if (normalizedCount <= 0) {
+      return {
+        ok: false,
+        status: 'invalid_count',
+        count: normalizedCount,
+        batchSize: normalizedBatchSize,
+        message: 'Crew count must be greater than 0.',
+      };
+    }
+
+    const status = await this.getCrewDepositStatus();
+    if (!status.ready) {
+      return {
+        ok: false,
+        status: status.status,
+        count: normalizedCount,
+        batchSize: normalizedBatchSize,
+        message: status.message,
+      };
+    }
+
+    return {
+      ok: false,
+      status: 'not_implemented',
+      count: normalizedCount,
+      batchSize: normalizedBatchSize,
+      message: 'Crew cNFT discovery/proof fetching is not implemented yet.',
+    };
   }
 
   private async getStarbaseCargoPods(starbaseName: string): Promise<PublicKey[]> {

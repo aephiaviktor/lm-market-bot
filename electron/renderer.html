@@ -181,6 +181,8 @@
               <button id="save-btn" type="button">Save Settings</button>
               <button id="start-btn" type="button">Start Bot</button>
               <button id="stop-btn" type="button">Stop Bot</button>
+              <span class="actions-spacer"></span>
+              <button id="deposit-crew-btn" type="button">Deposit Crew</button>
             </div>
           </section>
 
@@ -287,6 +289,31 @@
         <div class="update-dialog-actions">
           <button id="update-confirm-btn" type="button" disabled>Update</button>
           <button id="update-cancel-btn" type="button">Cancel</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="deposit-crew-modal" hidden>
+      <section class="update-dialog deposit-crew-dialog" role="dialog" aria-modal="true" aria-labelledby="deposit-crew-dialog-title">
+        <h2 id="deposit-crew-dialog-title">Deposit Crew</h2>
+        <div class="deposit-crew-summary">
+          <div>
+            <span>Available crew</span>
+            <strong id="deposit-crew-available">Checking...</strong>
+          </div>
+          <div>
+            <span>Batch size</span>
+            <strong id="deposit-crew-batch-size">6</strong>
+          </div>
+        </div>
+        <label class="deposit-crew-field">
+          Crew to deposit
+          <input id="deposit-crew-count" type="number" min="1" step="1" inputmode="numeric" autocomplete="off" />
+        </label>
+        <p class="update-message" id="deposit-crew-message">Checking crew deposit readiness...</p>
+        <div class="update-dialog-actions">
+          <button id="deposit-crew-confirm-btn" type="button" disabled>Deposit Crew</button>
+          <button id="deposit-crew-cancel-btn" type="button">Cancel</button>
         </div>
       </section>
     </div>

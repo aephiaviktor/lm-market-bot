@@ -16,6 +16,7 @@ const fields = [
 
 const STATUS_POLL_MS = 60000;
 const AUTO_RERUN_COOLDOWN_MS = 120000;
+const CREW_DEPOSIT_BATCH_SIZE = 6;
 const APP_VERSION = window.botApi?.appVersion || 'unknown';
 const FULL_RESTART_CONFIG_KEYS = new Set([
   'AEPHIA_API_KEY',
@@ -40,6 +41,7 @@ const logsEl = document.getElementById('logs');
 const saveBtn = document.getElementById('save-btn');
 const startBtn = document.getElementById('start-btn');
 const stopBtn = document.getElementById('stop-btn');
+const depositCrewBtn = document.getElementById('deposit-crew-btn');
 const updateBtn = document.getElementById('update-btn');
 const updateModal = document.getElementById('update-modal');
 const updateCurrentVersionEl = document.getElementById('update-current-version');
@@ -47,6 +49,13 @@ const updateLatestVersionEl = document.getElementById('update-latest-version');
 const updateMessageEl = document.getElementById('update-message');
 const updateConfirmBtn = document.getElementById('update-confirm-btn');
 const updateCancelBtn = document.getElementById('update-cancel-btn');
+const depositCrewModal = document.getElementById('deposit-crew-modal');
+const depositCrewAvailableEl = document.getElementById('deposit-crew-available');
+const depositCrewBatchSizeEl = document.getElementById('deposit-crew-batch-size');
+const depositCrewCountInput = document.getElementById('deposit-crew-count');
+const depositCrewMessageEl = document.getElementById('deposit-crew-message');
+const depositCrewConfirmBtn = document.getElementById('deposit-crew-confirm-btn');
+const depositCrewCancelBtn = document.getElementById('deposit-crew-cancel-btn');
 const addRuleRowBtn = document.getElementById('add-rule-row-btn');
 const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
 const sendRpcLimiterBtn = document.getElementById('send-rpc-limiter-btn');
@@ -94,6 +103,7 @@ let activeAssetRuleGroup = 'raw';
 let availableUpdate = null;
 let updateCheckInFlight = false;
 let updateCheckPromise = null;
+let crewDepositStatus = null;
 
 const RAW_MATERIAL_START = 'Arco';
 const RAW_MATERIAL_END = 'Titanium Ore';
@@ -130,6 +140,10 @@ function setUpdateModalOpen(open) {
   updateModal.hidden = !open;
 }
 
+function setDepositCrewModalOpen(open) {
+  depositCrewModal.hidden = !open;
+}
+
 function renderUpdateButtonState(result, error = null) {
   const updateAvailable = Boolean(result?.updateAvailable);
   updateBtn.classList.toggle('update-available', updateAvailable);
@@ -159,6 +173,74 @@ function renderUpdateModalState(result, error = null) {
 
   updateMessageEl.textContent = 'LM Market Bot is already up to date.';
   updateConfirmBtn.textContent = 'Update';
+}
+
+function getAvailableCrewCount(status) {
+  const count = Number(status?.availableCrew ?? NaN);
+  return Number.isFinite(count) && count >= 0 ? Math.floor(count) : null;
+}
+
+function renderDepositCrewStatus(status, error = null) {
+  crewDepositStatus = status || null;
+  const availableCrew = getAvailableCrewCount(status);
+  const batchSize = Number(status?.batchSize ?? CREW_DEPOSIT_BATCH_SIZE);
+  const effectiveBatchSize = Number.isFinite(batchSize) && batchSize > 0 ? Math.floor(batchSize) : CREW_DEPOSIT_BATCH_SIZE;
+  depositCrewBatchSizeEl.textContent = String(effectiveBatchSize);
+  depositCrewAvailableEl.textContent = availableCrew === null ? 'Unknown' : formatNumber(availableCrew, 0);
+
+  const currentCount = Math.max(1, Math.floor(Number(depositCrewCountInput.value || 1)));
+  if (availableCrew !== null) {
+    depositCrewCountInput.max = String(availableCrew);
+    depositCrewCountInput.value = String(Math.min(currentCount, Math.max(1, availableCrew)));
+  } else {
+    depositCrewCountInput.removeAttribute('max');
+    depositCrewCountInput.value = String(currentCount);
+  }
+
+  const requestedCount = Math.max(1, Math.floor(Number(depositCrewCountInput.value || 1)));
+  const estimatedTxCount = Math.ceil(requestedCount / effectiveBatchSize);
+  const ready = Boolean(status?.ready) && !error && (availableCrew === null || availableCrew > 0);
+  depositCrewConfirmBtn.disabled = !ready;
+
+  if (error) {
+    depositCrewMessageEl.textContent = `Crew deposit check failed: ${error?.message || String(error)}`;
+    return;
+  }
+
+  if (!status?.ok) {
+    depositCrewMessageEl.textContent = status?.message || 'Crew deposit status is unavailable.';
+    return;
+  }
+
+  if (!status.ready) {
+    depositCrewMessageEl.textContent = status.message || 'Crew deposit is not ready.';
+    return;
+  }
+
+  depositCrewMessageEl.textContent = `Will send about ${estimatedTxCount} transaction${estimatedTxCount === 1 ? '' : 's'}.`;
+}
+
+async function openDepositCrewDialog() {
+  if (typeof window.botApi?.getCrewDepositStatus !== 'function') {
+    renderDepositCrewStatus(null, new Error('Crew deposit bridge unavailable. Restart LM Market Bot and try again.'));
+    setDepositCrewModalOpen(true);
+    return;
+  }
+
+  depositCrewAvailableEl.textContent = 'Checking...';
+  depositCrewBatchSizeEl.textContent = String(CREW_DEPOSIT_BATCH_SIZE);
+  depositCrewCountInput.value = '1';
+  depositCrewConfirmBtn.disabled = true;
+  depositCrewMessageEl.textContent = 'Checking crew deposit readiness...';
+  setDepositCrewModalOpen(true);
+
+  try {
+    const status = await window.botApi.getCrewDepositStatus();
+    renderDepositCrewStatus(status);
+  } catch (err) {
+    renderDepositCrewStatus(null, err);
+    appendLog(`[${new Date().toISOString()}] [ERROR] Crew deposit check failed: ${err?.message || String(err)}`);
+  }
 }
 
 async function openUpdateDialog() {
@@ -1489,6 +1571,10 @@ stopBtn.addEventListener('click', async () => {
   await refreshBotStatus();
 });
 
+depositCrewBtn.addEventListener('click', () => {
+  void openDepositCrewDialog();
+});
+
 updateBtn.addEventListener('click', () => {
   void openUpdateDialog();
 });
@@ -1500,6 +1586,50 @@ updateCancelBtn.addEventListener('click', () => {
 updateModal.addEventListener('click', (event) => {
   if (event.target === updateModal) {
     setUpdateModalOpen(false);
+  }
+});
+
+depositCrewCancelBtn.addEventListener('click', () => {
+  setDepositCrewModalOpen(false);
+});
+
+depositCrewModal.addEventListener('click', (event) => {
+  if (event.target === depositCrewModal) {
+    setDepositCrewModalOpen(false);
+  }
+});
+
+depositCrewCountInput.addEventListener('input', () => {
+  renderDepositCrewStatus(crewDepositStatus);
+});
+
+depositCrewConfirmBtn.addEventListener('click', async () => {
+  const requestedCount = Math.max(1, Math.floor(Number(depositCrewCountInput.value || 1)));
+  const availableCrew = getAvailableCrewCount(crewDepositStatus);
+  const count = availableCrew === null ? requestedCount : Math.min(requestedCount, availableCrew);
+  depositCrewConfirmBtn.disabled = true;
+  depositCrewCancelBtn.disabled = true;
+  depositCrewMessageEl.textContent = `Depositing ${count} crew in batches of ${CREW_DEPOSIT_BATCH_SIZE}...`;
+  appendLog(`[${new Date().toISOString()}] [INFO] Deposit Crew requested for ${count} crew.`);
+
+  try {
+    const result = await window.botApi.depositCrew({ count, batchSize: CREW_DEPOSIT_BATCH_SIZE });
+    if (result?.ok) {
+      depositCrewMessageEl.textContent = `Deposit Crew ${result.status || 'complete'}.`;
+      appendLog(`[${new Date().toISOString()}] [INFO] Deposit Crew ${result.status || 'complete'}.`);
+      await refreshBotStatus();
+      return;
+    }
+
+    const message = result?.message || `Deposit Crew failed: ${result?.status || 'unknown status'}`;
+    depositCrewMessageEl.textContent = message;
+    appendLog(`[${new Date().toISOString()}] [WARN] ${message}`);
+  } catch (err) {
+    depositCrewMessageEl.textContent = `Deposit Crew failed: ${err?.message || String(err)}`;
+    appendLog(`[${new Date().toISOString()}] [ERROR] Deposit Crew failed: ${err?.message || String(err)}`);
+  } finally {
+    depositCrewCancelBtn.disabled = false;
+    renderDepositCrewStatus(crewDepositStatus);
   }
 });
 

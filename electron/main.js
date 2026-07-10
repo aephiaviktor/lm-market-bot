@@ -1041,6 +1041,61 @@ ipcMain.handle('bot:redeem-certificate', async (_event, payload) => {
   }
 });
 
+ipcMain.handle('crew-deposit:status', async () => {
+  if (!bot || !botRunning) {
+    return {
+      ok: true,
+      ready: false,
+      status: 'bot_not_running',
+      batchSize: 6,
+      availableCrew: null,
+      message: 'Start the bot before depositing crew.',
+    };
+  }
+
+  try {
+    return await bot.getCrewDepositStatus();
+  } catch (err) {
+    logger.error('Crew deposit status failed:', err);
+    return {
+      ok: false,
+      ready: false,
+      status: 'error',
+      batchSize: 6,
+      availableCrew: null,
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('crew-deposit:run', async (_event, payload) => {
+  const count = Math.max(0, Math.floor(Number(payload?.count) || 0));
+  const batchSize = Math.max(1, Math.floor(Number(payload?.batchSize) || 6));
+
+  if (!bot || !botRunning) {
+    return {
+      ok: false,
+      status: 'bot_not_running',
+      count,
+      batchSize,
+      message: 'Start the bot before depositing crew.',
+    };
+  }
+
+  try {
+    return await bot.depositCrewToGame(count, batchSize);
+  } catch (err) {
+    logger.error('Crew deposit failed:', err);
+    return {
+      ok: false,
+      status: 'error',
+      count,
+      batchSize,
+      message: err?.message || String(err),
+    };
+  }
+});
+
 ipcMain.handle('bot:status', async () => {
   if (!bot) {
     return getEmptyStatusSnapshot();
