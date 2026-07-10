@@ -941,6 +941,19 @@ select:focus {
   flex: 1 1 auto;
 }
 
+#deposit-crew-btn {
+  border-color: rgba(248, 201, 76, 0.8);
+  color: #fff7d0;
+  background: linear-gradient(180deg, #163763 0%, #10284c 100%);
+  box-shadow: inset 0 0 0 1px rgba(248, 201, 76, 0.16), 0 0 0 1px rgba(248, 201, 76, 0.08);
+}
+
+#deposit-crew-btn:hover:enabled {
+  border-color: rgba(255, 214, 96, 0.95);
+  background: linear-gradient(180deg, #1a4375 0%, #13315b 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 214, 96, 0.24), 0 0 0 2px rgba(248, 201, 76, 0.16);
+}
+
 .rail-update-btn {
   min-width: 70px;
   padding: 6px 12px;
