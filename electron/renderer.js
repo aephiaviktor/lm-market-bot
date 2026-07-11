@@ -1634,7 +1634,10 @@ depositCrewConfirmBtn.addEventListener('click', async () => {
     appendLog(`[${new Date().toISOString()}] [ERROR] Deposit Crew failed: ${err?.message || String(err)}`);
   } finally {
     depositCrewCancelBtn.disabled = false;
-    renderDepositCrewStatus(crewDepositStatus);
+    const refreshedAvailableCrew = getAvailableCrewCount(crewDepositStatus);
+    depositCrewConfirmBtn.disabled =
+      !Boolean(crewDepositStatus?.ready) ||
+      (refreshedAvailableCrew !== null && refreshedAvailableCrew <= 0);
   }
 });
 

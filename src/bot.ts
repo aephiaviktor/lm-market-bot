@@ -2661,6 +2661,18 @@ export class LmMarketBot {
         message: `Could not discover crew cNFTs through the configured RPC. ${error instanceof Error ? error.message : String(error)}`,
       };
     }
+    if (!context.crewOwner.equals(this.wallet.publicKey)) {
+      return {
+        ok: true,
+        ready: false,
+        status: 'crew_owner_signature_required',
+        batchSize: CREW_DEPOSIT_BATCH_SIZE,
+        availableCrew: crewAssets.length,
+        message:
+          `Found ${crewAssets.length} owner-wallet crew cNFT(s), but Deposit Crew requires the crew owner signature. ` +
+          'Hot-wallet-only deposit is unavailable while OWNER_WALLET differs from the hot wallet.',
+      };
+    }
 
     return {
       ok: true,
@@ -2714,6 +2726,17 @@ export class LmMarketBot {
         batchSize: normalizedBatchSize,
         deposited: 0,
         message: 'Could not resolve CSS starbase, starbase player, or crew config for crew deposits.',
+      };
+    }
+    if (!context.crewOwner.equals(this.wallet.publicKey)) {
+      return {
+        ok: false,
+        status: 'crew_owner_signature_required',
+        count: normalizedCount,
+        batchSize: normalizedBatchSize,
+        deposited: 0,
+        message:
+          'Deposit Crew requires the crew owner signature. Hot-wallet-only deposit is unavailable while OWNER_WALLET differs from the hot wallet.',
       };
     }
 
