@@ -760,6 +760,7 @@ type LocalMarketSellContext = {
 
 type CrewDepositContext = {
   targetStarbaseName: string;
+  crewOwner: PublicKey;
   starbase: PublicKey;
   starbasePlayer: PublicKey;
   gameId: PublicKey;
@@ -860,6 +861,7 @@ export type BotConfig = {
   rpcUrl: string;
   rpcUrlFallback?: string;
   faction: string;
+  ownerWallet: string;
   ownerProfile: string;
   hotWalletSecret: string;
   minSellQuantity: number;
@@ -1098,6 +1100,7 @@ export function buildBotConfig(input: BotInputConfig): BotConfig {
     rpcUrl: editable.RPC_URL,
     rpcUrlFallback: editable.RPC_URL_FALLBACK || undefined,
     faction: editable.FACTION,
+    ownerWallet: editable.OWNER_WALLET,
     ownerProfile: editable.OWNER_PROFILE,
     hotWalletSecret: editable.HOT_WALLET_SECRET,
     minSellQuantity,
@@ -1950,6 +1953,7 @@ export class LmMarketBot {
     this.config.checkIntervalMinutes = next.checkIntervalMinutes;
     this.config.relevantSellOrderPct = next.relevantSellOrderPct;
     this.config.relevantBuyOrderPct = next.relevantBuyOrderPct;
+    this.config.ownerWallet = next.ownerWallet;
     this.config.ownerProfile = next.ownerProfile;
     this.config.resourceList = next.resourceList;
     this.config.analysisDir = next.analysisDir;
@@ -2366,6 +2370,20 @@ export class LmMarketBot {
     return null;
   }
 
+  private getCrewDepositOwnerWallet(): PublicKey | null {
+    const ownerWallet = this.config.ownerWallet.trim();
+    if (!ownerWallet) {
+      this.logger.warn('OWNER_WALLET is not configured; cannot discover crew cNFTs for deposit.');
+      return null;
+    }
+    try {
+      return new PublicKey(ownerWallet);
+    } catch {
+      this.logger.warn('OWNER_WALLET is not a valid public key; cannot discover crew cNFTs for deposit.');
+      return null;
+    }
+  }
+
   private async callDasRpc<T>(method: string, params: unknown): Promise<T> {
     const urls = [this.config.rpcUrl, this.config.rpcUrlFallback].filter((url): url is string => Boolean(url && url.trim()));
     let lastError: unknown = null;
@@ -2425,7 +2443,7 @@ export class LmMarketBot {
     if (
       !id ||
       asset.burnt ||
-      owner !== this.wallet.publicKey.toBase58() ||
+      owner !== context.crewOwner.toBase58() ||
       !compression?.compressed ||
       collection !== context.collectionMint.toBase58()
     ) {
@@ -2462,6 +2480,11 @@ export class LmMarketBot {
       return null;
     }
 
+    const crewOwner = this.getCrewDepositOwnerWallet();
+    if (!crewOwner) {
+      return null;
+    }
+
     const starbasePlayer = await this.getStarbasePlayer(targetStarbaseName);
     if (!starbasePlayer) {
       this.logger.warn(`Cannot resolve starbase player for ${targetStarbaseName}; cannot deposit crew.`);
@@ -2493,6 +2516,7 @@ export class LmMarketBot {
 
     return {
       targetStarbaseName,
+      crewOwner,
       starbase,
       starbasePlayer,
       gameId,
@@ -2505,13 +2529,14 @@ export class LmMarketBot {
 
   private async discoverOwnedCrewAssets(context: CrewDepositContext): Promise<CrewAssetCandidate[]> {
     const assets: CrewAssetCandidate[] = [];
+    const ownerAddress = context.crewOwner.toBase58();
     let useSearchAssets = true;
     for (let page = 1; page <= CREW_ASSET_DISCOVERY_MAX_PAGES; page++) {
       let result: DasAssetList;
       if (useSearchAssets) {
         try {
           result = await this.callDasRpc<DasAssetList>('searchAssets', {
-            ownerAddress: this.wallet.publicKey.toBase58(),
+            ownerAddress,
             ownerType: 'single',
             grouping: ['collection', context.collectionMint.toBase58()],
             compressed: true,
@@ -2523,14 +2548,14 @@ export class LmMarketBot {
           this.logger.warn('DAS searchAssets failed; falling back to getAssetsByOwner for crew discovery.', error);
           useSearchAssets = false;
           result = await this.callDasRpc<DasAssetList>('getAssetsByOwner', {
-            ownerAddress: this.wallet.publicKey.toBase58(),
+            ownerAddress,
             limit: CREW_ASSET_DISCOVERY_PAGE_LIMIT,
             page,
           });
         }
       } else {
         result = await this.callDasRpc<DasAssetList>('getAssetsByOwner', {
-          ownerAddress: this.wallet.publicKey.toBase58(),
+          ownerAddress,
           limit: CREW_ASSET_DISCOVERY_PAGE_LIMIT,
           page,
         });
@@ -2626,7 +2651,7 @@ export class LmMarketBot {
     try {
       crewAssets = await this.discoverOwnedCrewAssets(context);
     } catch (error) {
-      this.logger.warn('Failed to discover hot-wallet crew cNFTs.', error);
+      this.logger.warn('Failed to discover configured owner-wallet crew cNFTs.', error);
       return {
         ok: true,
         ready: false,
@@ -2645,8 +2670,8 @@ export class LmMarketBot {
       availableCrew: crewAssets.length,
       message:
         crewAssets.length > 0
-          ? `Ready to deposit hot-wallet crew to ${context.targetStarbaseName}.`
-          : `No hot-wallet-owned crew cNFTs found for ${context.targetStarbaseName}.`,
+          ? `Ready to deposit owner-wallet crew to ${context.targetStarbaseName}.`
+          : `No owner-wallet crew cNFTs found for ${context.targetStarbaseName}.`,
     };
   }
 
@@ -2700,7 +2725,7 @@ export class LmMarketBot {
         count: normalizedCount,
         batchSize: normalizedBatchSize,
         deposited: 0,
-        message: `Only ${initialCrewAssets.length} hot-wallet crew cNFT(s) are available.`,
+        message: `Only ${initialCrewAssets.length} owner-wallet crew cNFT(s) are available.`,
       };
     }
 
