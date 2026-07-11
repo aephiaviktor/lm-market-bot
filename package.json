@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.62",
+  "version": "0.2.63",
   "description": "",
   "main": "electron/main.js",
   "scripts": {
@@ -19,6 +19,7 @@
     "@solana/web3.js": "^1.98.4",
     "@staratlas/anchor": "^0.25.0",
     "@staratlas/cargo": "^1.1.0",
+    "@staratlas/crew": "^0.7.0",
     "@staratlas/data-source": "^0.8.3",
     "@staratlas/factory": "^0.7.1",
     "@staratlas/player-profile": "^0.11.0",

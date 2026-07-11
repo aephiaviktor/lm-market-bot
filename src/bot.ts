@@ -1,6 +1,7 @@
 import { Buffer } from 'buffer';
 import {
   Connection,
+  ComputeBudgetProgram,
   Keypair,
   PublicKey,
   SendTransactionError,
@@ -30,10 +31,13 @@ import {
   findCertificateMintAddress,
   SAGE_IDL,
   SagePermissions,
+  SagePlayerProfile,
   Starbase,
   StarbasePlayer,
+  type CrewTransferInput,
   type SageIDLProgram,
 } from '@staratlas/sage';
+import { CREW_IDL, CrewConfig, type CrewIDLProgram } from '@staratlas/crew';
 import { PLAYER_PROFILE_IDL, PlayerProfile, type PlayerProfileIDLProgram } from '@staratlas/player-profile';
 import { RpcLimiter } from 'rpc_limiter';
 import bs58 from 'bs58';
@@ -53,6 +57,7 @@ const SAGE_PROGRAM_ID = new PublicKey('SAGE2HAwep459SNq61LHvjxPk4pLPEJLoMETef7f7
 const PLAYER_PROFILE_PROGRAM_ID = new PublicKey('pprofELXjL5Kck7Jn5hCpwAL82DpTkSYBENzahVtbc9');
 const CARGO_PROGRAM_ID = new PublicKey('Cargo2VNTPPTi9c1vq1Jw5d3BWUNr18MjRtSupAghKEk');
 const PROFILE_FACTION_PROGRAM_ID = new PublicKey('pFACSRuobDmvfMKq1bAzwj27t6d2GJhSCHb1VcfnRmq');
+const CREW_PROGRAM_ID = new PublicKey('CREWiq8qbxvo4SKkAFpVnc6t7CRQC4tAAscsNAENXgrJ');
 const SAGE_MARKET_HOOK_PROGRAM_ID = new PublicKey('hooKwBRKyzBqxVZFQVpLMKGexhmc6ZNaRAbwWi8uMok');
 const CARGO_STATS_DEFINITION = new PublicKey('CSTatsVpHbvZmwHbCjZKVfYQT5JXfsXccXufhEcwCqTg');
 const QUOTE_ATLAS_MINT = new PublicKey('ATLASXmbPQxBUYbxPsV97usA3fPQYEqzQBUHgiFCUsXx');
@@ -88,6 +93,10 @@ const STARBASE_PLAYER_CACHE_TTL_MS = 3600000;
 const CARGO_POD_LIST_CACHE_TTL_MS = 3600000;
 const CARGO_POD_TOKEN_CACHE_TTL_MS = 600000;
 const LOCAL_MARKET_SELL_CONTEXT_CACHE_TTL_MS = 600000;
+const CREW_DEPOSIT_BATCH_SIZE = 6;
+const CREW_DEPOSIT_COMPUTE_UNIT_LIMIT = 1_400_000;
+const CREW_ASSET_DISCOVERY_PAGE_LIMIT = 1000;
+const CREW_ASSET_DISCOVERY_MAX_PAGES = 10;
 const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [20000, 60000, 180000];
 const RPC_TRANSIENT_TRANSPORT_RETRY_DELAYS_MS = [5000];
 const RPC_LIMITER_SLOW_WAIT_LOG_MS = 100;
@@ -747,6 +756,69 @@ type LocalMarketSellContext = {
   gameState: PublicKey;
   profileFaction: PublicKey;
   profileKeyIndex: number;
+};
+
+type CrewDepositContext = {
+  targetStarbaseName: string;
+  starbase: PublicKey;
+  starbasePlayer: PublicKey;
+  gameId: PublicKey;
+  profileFaction: PublicKey;
+  crewProgramConfig: PublicKey;
+  allowedMerkleTrees: Set<string>;
+  collectionMint: PublicKey;
+};
+
+type DasAsset = {
+  id?: string;
+  burnt?: boolean;
+  compression?: {
+    compressed?: boolean;
+    data_hash?: string;
+    creator_hash?: string;
+    tree?: string;
+    leaf_id?: number;
+  };
+  grouping?: Array<{ group_key?: string; group_value?: string }>;
+  ownership?: {
+    owner?: string;
+    delegate?: string | null;
+    delegated?: boolean;
+  };
+  content?: {
+    metadata?: {
+      name?: string;
+    };
+  };
+};
+
+type DasAssetList = {
+  total?: number;
+  limit?: number;
+  page?: number;
+  items?: DasAsset[];
+};
+
+type DasAssetProof = {
+  root?: string;
+  proof?: string[];
+  node_index?: number;
+  leaf?: string;
+  tree_id?: string;
+};
+
+type CrewAssetCandidate = {
+  id: string;
+  name: string;
+  merkleTree: PublicKey;
+  dataHash: PublicKey;
+  creatorHash: PublicKey;
+  leafIndex: number;
+};
+
+type CrewAssetWithProof = CrewAssetCandidate & {
+  root: PublicKey;
+  proof: PublicKey[];
 };
 
 type IndexedAssetRule = {
@@ -1775,6 +1847,7 @@ export class LmMarketBot {
   private readonly gm = new GmClientService();
   private readonly sageProgram: SageIDLProgram & { account: any };
   private readonly cargoProgram: CargoIDLProgram;
+  private readonly crewProgram: CrewIDLProgram;
   private readonly profileFactionProgram: ProfileFactionIDLProgram;
   private readonly playerProfileProgram: PlayerProfileIDLProgram;
   private readonly analysisPath: string;
@@ -1841,6 +1914,11 @@ export class LmMarketBot {
       CARGO_PROGRAM_ID,
       provider,
     ) as unknown as CargoIDLProgram;
+    this.crewProgram = new Program(
+      getProgramIdlWithoutEvents(CREW_IDL),
+      CREW_PROGRAM_ID,
+      provider,
+    ) as unknown as CrewIDLProgram;
     this.profileFactionProgram = new Program(
       getProgramIdlWithoutEvents(PROFILE_FACTION_IDL),
       PROFILE_FACTION_PROGRAM_ID,
@@ -2277,32 +2355,307 @@ export class LmMarketBot {
     return matchingIndex;
   }
 
+  private getCrewDepositTargetStarbaseName(): string | null {
+    const faction = String(this.config.faction || '').trim().toUpperCase();
+    if (faction === 'USTUR') {
+      return 'UST-1';
+    }
+    if (faction === 'MUD' || faction === 'ONI') {
+      return `${faction}-1`;
+    }
+    return null;
+  }
+
+  private async callDasRpc<T>(method: string, params: unknown): Promise<T> {
+    const urls = [this.config.rpcUrl, this.config.rpcUrlFallback].filter((url): url is string => Boolean(url && url.trim()));
+    let lastError: unknown = null;
+
+    for (const url of urls) {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: Date.now(),
+              method,
+              params,
+            }),
+          });
+          const text = await response.text();
+          let payload: { result?: T; error?: { message?: string; code?: number }; [key: string]: unknown } = {};
+          try {
+            payload = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`DAS ${method} returned non-JSON response: ${text.slice(0, 160)}`);
+          }
+
+          if (!response.ok || payload.error) {
+            const message = payload.error?.message || response.statusText || `HTTP ${response.status}`;
+            throw new Error(`DAS ${method} failed: ${message}`);
+          }
+          if (!Object.prototype.hasOwnProperty.call(payload, 'result')) {
+            throw new Error(`DAS ${method} response did not include result.`);
+          }
+          return payload.result as T;
+        } catch (error) {
+          lastError = error;
+          const isRateLimit = isRpcRateLimitError(error);
+          const isTransientTransport = isTransientRpcTransportError(error);
+          const retryDelaysMs = isRateLimit ? RPC_RATE_LIMIT_RETRY_DELAYS_MS : RPC_TRANSIENT_TRANSPORT_RETRY_DELAYS_MS;
+          const retryDelayMs = retryDelaysMs[attempt];
+          if ((!isRateLimit && !isTransientTransport) || retryDelayMs === undefined) {
+            break;
+          }
+          this.logger.warn(`DAS ${method} failed; retrying in ${retryDelayMs}ms.`, error);
+          await sleep(retryDelayMs);
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(`DAS ${method} failed.`);
+  }
+
+  private parseCrewAssetCandidate(asset: DasAsset, context: CrewDepositContext): CrewAssetCandidate | null {
+    const id = String(asset.id || '').trim();
+    const owner = String(asset.ownership?.owner || '').trim();
+    const collection = asset.grouping?.find((group) => group.group_key === 'collection')?.group_value;
+    const compression = asset.compression;
+    if (
+      !id ||
+      asset.burnt ||
+      owner !== this.wallet.publicKey.toBase58() ||
+      !compression?.compressed ||
+      collection !== context.collectionMint.toBase58()
+    ) {
+      return null;
+    }
+
+    const tree = String(compression.tree || '').trim();
+    if (!context.allowedMerkleTrees.has(tree)) {
+      return null;
+    }
+    if (!compression.data_hash || !compression.creator_hash || typeof compression.leaf_id !== 'number') {
+      return null;
+    }
+
+    try {
+      return {
+        id,
+        name: String(asset.content?.metadata?.name || 'Crew'),
+        merkleTree: new PublicKey(tree),
+        dataHash: new PublicKey(compression.data_hash),
+        creatorHash: new PublicKey(compression.creator_hash),
+        leafIndex: compression.leaf_id,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async resolveCrewDepositContext(): Promise<CrewDepositContext | null> {
+    const targetStarbaseName = this.getCrewDepositTargetStarbaseName();
+    const starbaseEntry = targetStarbaseName ? findStarbaseRegistryEntry(targetStarbaseName) : null;
+    if (!targetStarbaseName || !starbaseEntry) {
+      this.logger.warn(`Cannot resolve CSS starbase for faction ${this.config.faction}.`);
+      return null;
+    }
+
+    const starbasePlayer = await this.getStarbasePlayer(targetStarbaseName);
+    if (!starbasePlayer) {
+      this.logger.warn(`Cannot resolve starbase player for ${targetStarbaseName}; cannot deposit crew.`);
+      return null;
+    }
+
+    const starbase = new PublicKey(starbaseEntry.publicKey);
+    const starbaseAccount = await this.sageProgram.account.starbase.fetch(starbase);
+    const gameId = starbaseAccount.gameId as PublicKey;
+    const profileFaction = ProfileFactionAccount.findAddress(
+      this.profileFactionProgram,
+      new PublicKey(this.config.ownerProfile),
+    )[0];
+    const crewProgramConfig = CrewConfig.findAddress(this.crewProgram)[0];
+    const crewConfigAccount = await this.connection.getAccountInfo(crewProgramConfig, 'confirmed');
+    if (!crewConfigAccount || !crewConfigAccount.owner.equals(CREW_PROGRAM_ID)) {
+      this.logger.warn(`Crew config ${crewProgramConfig.toBase58()} is missing or invalid; cannot deposit crew.`);
+      return null;
+    }
+
+    const decodedCrewConfig = CrewConfig.decodeData(
+      { accountId: crewProgramConfig, accountInfo: crewConfigAccount },
+      this.crewProgram,
+    );
+    if (decodedCrewConfig.type !== 'ok') {
+      this.logger.warn(`Failed to decode crew config ${crewProgramConfig.toBase58()}; cannot deposit crew.`);
+      return null;
+    }
+
+    return {
+      targetStarbaseName,
+      starbase,
+      starbasePlayer,
+      gameId,
+      profileFaction,
+      crewProgramConfig,
+      allowedMerkleTrees: new Set(decodedCrewConfig.data.merkleTrees.map((tree) => tree.toBase58())),
+      collectionMint: decodedCrewConfig.data.data.collectionMint,
+    };
+  }
+
+  private async discoverOwnedCrewAssets(context: CrewDepositContext): Promise<CrewAssetCandidate[]> {
+    const assets: CrewAssetCandidate[] = [];
+    let useSearchAssets = true;
+    for (let page = 1; page <= CREW_ASSET_DISCOVERY_MAX_PAGES; page++) {
+      let result: DasAssetList;
+      if (useSearchAssets) {
+        try {
+          result = await this.callDasRpc<DasAssetList>('searchAssets', {
+            ownerAddress: this.wallet.publicKey.toBase58(),
+            ownerType: 'single',
+            grouping: ['collection', context.collectionMint.toBase58()],
+            compressed: true,
+            burnt: false,
+            limit: CREW_ASSET_DISCOVERY_PAGE_LIMIT,
+            page,
+          });
+        } catch (error) {
+          this.logger.warn('DAS searchAssets failed; falling back to getAssetsByOwner for crew discovery.', error);
+          useSearchAssets = false;
+          result = await this.callDasRpc<DasAssetList>('getAssetsByOwner', {
+            ownerAddress: this.wallet.publicKey.toBase58(),
+            limit: CREW_ASSET_DISCOVERY_PAGE_LIMIT,
+            page,
+          });
+        }
+      } else {
+        result = await this.callDasRpc<DasAssetList>('getAssetsByOwner', {
+          ownerAddress: this.wallet.publicKey.toBase58(),
+          limit: CREW_ASSET_DISCOVERY_PAGE_LIMIT,
+          page,
+        });
+      }
+      const items = Array.isArray(result.items) ? result.items : [];
+      for (const item of items) {
+        const parsed = this.parseCrewAssetCandidate(item, context);
+        if (parsed) {
+          assets.push(parsed);
+        }
+      }
+      if (items.length < CREW_ASSET_DISCOVERY_PAGE_LIMIT) {
+        break;
+      }
+    }
+    return assets;
+  }
+
+  private async fetchCrewAssetProofs(assets: CrewAssetCandidate[]): Promise<CrewAssetWithProof[]> {
+    if (!assets.length) {
+      return [];
+    }
+
+    let proofMap: Record<string, DasAssetProof> | DasAssetProof[] | null = null;
+    try {
+      proofMap = await this.callDasRpc<Record<string, DasAssetProof> | DasAssetProof[]>(
+        'getAssetProofs',
+        [assets.map((asset) => asset.id)],
+      );
+    } catch (error) {
+      this.logger.warn('DAS getAssetProofs batch call failed; falling back to getAssetProof per crew asset.', error);
+    }
+
+    const withProof: CrewAssetWithProof[] = [];
+    for (let index = 0; index < assets.length; index++) {
+      const asset = assets[index];
+      const proof =
+        (Array.isArray(proofMap) ? proofMap[index] : proofMap?.[asset.id]) ??
+        (await this.callDasRpc<DasAssetProof>('getAssetProof', [asset.id]));
+      const root = proof.root;
+      const proofTree = proof.tree_id;
+      if (!root || !proofTree || !Array.isArray(proof.proof)) {
+        throw new Error(`DAS proof for crew asset ${asset.id} is missing root/tree/proof.`);
+      }
+      if (proofTree !== asset.merkleTree.toBase58()) {
+        throw new Error(`DAS proof tree mismatch for crew asset ${asset.id}.`);
+      }
+      withProof.push({
+        ...asset,
+        root: new PublicKey(root),
+        proof: proof.proof.map((key) => new PublicKey(key)),
+      });
+    }
+    return withProof;
+  }
+
+  private crewAssetToTransferInput(asset: CrewAssetWithProof): CrewTransferInput {
+    return {
+      merkleTree: asset.merkleTree,
+      root: asset.root,
+      dataHash: asset.dataHash,
+      creatorHash: asset.creatorHash,
+      leafIndex: asset.leafIndex,
+      proof: asset.proof,
+    };
+  }
+
   async getCrewDepositStatus(): Promise<CrewDepositStatus> {
-    const profileKeyIndex = await this.resolveOwnerManageCrewProfileKeyIndex();
-    if (profileKeyIndex === null) {
+    if ((await this.resolveOwnerManageCrewProfileKeyIndex()) === null) {
       return {
         ok: true,
         ready: false,
         status: 'missing_manage_crew_permission',
-        batchSize: 6,
+        batchSize: CREW_DEPOSIT_BATCH_SIZE,
         availableCrew: null,
         message: 'Hot wallet is not ready to deposit crew. Check OWNER_PROFILE SAGE manageCrew permission.',
       };
     }
 
+    const context = await this.resolveCrewDepositContext();
+    if (!context) {
+      return {
+        ok: true,
+        ready: false,
+        status: 'crew_context_unavailable',
+        batchSize: CREW_DEPOSIT_BATCH_SIZE,
+        availableCrew: null,
+        message: 'Could not resolve CSS starbase, starbase player, or crew config for crew deposits.',
+      };
+    }
+
+    let crewAssets: CrewAssetCandidate[];
+    try {
+      crewAssets = await this.discoverOwnedCrewAssets(context);
+    } catch (error) {
+      this.logger.warn('Failed to discover hot-wallet crew cNFTs.', error);
+      return {
+        ok: true,
+        ready: false,
+        status: 'crew_discovery_failed',
+        batchSize: CREW_DEPOSIT_BATCH_SIZE,
+        availableCrew: null,
+        message: `Could not discover crew cNFTs through the configured RPC. ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
     return {
       ok: true,
-      ready: false,
-      status: 'crew_discovery_not_connected',
-      batchSize: 6,
-      availableCrew: null,
-      message: 'manageCrew is ready. Crew cNFT discovery and Merkle proof fetching still need to be connected before deposits can run.',
+      ready: crewAssets.length > 0,
+      status: crewAssets.length > 0 ? 'ready' : 'no_available_crew',
+      batchSize: CREW_DEPOSIT_BATCH_SIZE,
+      availableCrew: crewAssets.length,
+      message:
+        crewAssets.length > 0
+          ? `Ready to deposit hot-wallet crew to ${context.targetStarbaseName}.`
+          : `No hot-wallet-owned crew cNFTs found for ${context.targetStarbaseName}.`,
     };
   }
 
-  async depositCrewToGame(count: number, batchSize = 6): Promise<{ ok: boolean; status: string; count: number; batchSize: number; message?: string }> {
+  async depositCrewToGame(
+    count: number,
+    batchSize = CREW_DEPOSIT_BATCH_SIZE,
+  ): Promise<{ ok: boolean; status: string; count: number; batchSize: number; deposited?: number; transactions?: string[]; message?: string }> {
     const normalizedCount = Math.max(0, Math.floor(Number(count) || 0));
-    const normalizedBatchSize = Math.max(1, Math.floor(Number(batchSize) || 6));
+    const normalizedBatchSize = CREW_DEPOSIT_BATCH_SIZE;
     if (normalizedCount <= 0) {
       return {
         ok: false,
@@ -2312,24 +2665,102 @@ export class LmMarketBot {
         message: 'Crew count must be greater than 0.',
       };
     }
+    if (Number(batchSize) !== CREW_DEPOSIT_BATCH_SIZE) {
+      this.logger.info(`Deposit Crew requested batch size ${batchSize}; using fixed batch size ${CREW_DEPOSIT_BATCH_SIZE}.`);
+    }
 
-    const status = await this.getCrewDepositStatus();
-    if (!status.ready) {
+    if ((await this.resolveOwnerManageCrewProfileKeyIndex()) === null) {
       return {
         ok: false,
-        status: status.status,
+        status: 'missing_manage_crew_permission',
         count: normalizedCount,
         batchSize: normalizedBatchSize,
-        message: status.message,
+        deposited: 0,
+        message: 'Hot wallet is not ready to deposit crew. Check OWNER_PROFILE SAGE manageCrew permission.',
       };
     }
 
+    const context = await this.resolveCrewDepositContext();
+    if (!context) {
+      return {
+        ok: false,
+        status: 'crew_context_unavailable',
+        count: normalizedCount,
+        batchSize: normalizedBatchSize,
+        deposited: 0,
+        message: 'Could not resolve CSS starbase, starbase player, or crew config for crew deposits.',
+      };
+    }
+
+    const initialCrewAssets = await this.discoverOwnedCrewAssets(context);
+    if (initialCrewAssets.length < normalizedCount) {
+      return {
+        ok: false,
+        status: 'insufficient_crew',
+        count: normalizedCount,
+        batchSize: normalizedBatchSize,
+        deposited: 0,
+        message: `Only ${initialCrewAssets.length} hot-wallet crew cNFT(s) are available.`,
+      };
+    }
+
+    const transactions: string[] = [];
+    let deposited = 0;
+    while (deposited < normalizedCount) {
+      const remaining = normalizedCount - deposited;
+      const crewAssets = await this.discoverOwnedCrewAssets(context);
+      const batchAssets = crewAssets.slice(0, Math.min(normalizedBatchSize, remaining));
+      if (!batchAssets.length) {
+        throw new Error(`No crew cNFTs remained available after depositing ${deposited}/${normalizedCount}.`);
+      }
+
+      const assetsWithProof = await this.fetchCrewAssetProofs(batchAssets);
+      const transaction = new Transaction().add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: CREW_DEPOSIT_COMPUTE_UNIT_LIMIT }),
+      );
+      const addCrew = await SagePlayerProfile.addCrewToGame(
+        this.sageProgram,
+        new PublicKey(this.config.ownerProfile),
+        context.profileFaction,
+        keypairToAsyncSigner(this.wallet),
+        context.starbasePlayer,
+        context.starbase,
+        context.crewProgramConfig,
+        context.gameId,
+        {
+          items: assetsWithProof.map((asset) => this.crewAssetToTransferInput(asset)),
+        },
+      )(keypairToAsyncSigner(this.wallet));
+
+      for (const item of Array.isArray(addCrew) ? addCrew : [addCrew]) {
+        transaction.add(item.instruction);
+      }
+
+      this.logger.info(
+        `Depositing ${assetsWithProof.length} crew to ${context.targetStarbaseName} ` +
+          `(${deposited + assetsWithProof.length}/${normalizedCount}).`,
+      );
+      const signature = await this.signAndSend(transaction);
+      transactions.push(signature);
+      deposited += assetsWithProof.length;
+
+      await this.appendLog({
+        event: 'DEPOSIT_CREW',
+        starbase: context.targetStarbaseName,
+        count: assetsWithProof.length,
+        crew: assetsWithProof.map((asset) => ({ id: asset.id, name: asset.name, leafIndex: asset.leafIndex })),
+        tx: signature,
+      });
+    }
+
     return {
-      ok: false,
-      status: 'not_implemented',
+      ok: true,
+      status: 'deposited',
       count: normalizedCount,
       batchSize: normalizedBatchSize,
-      message: 'Crew cNFT discovery/proof fetching is not implemented yet.',
+      deposited,
+      transactions,
+      message: `Deposited ${deposited} crew to ${context.targetStarbaseName} in ${transactions.length} transaction(s).`,
     };
   }
 

@@ -127,6 +127,14 @@ h3 {
   min-width: 0;
 }
 
+.app-version {
+  flex-shrink: 0;
+  color: #9fc8ea;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .app-header-logo {
   width: 36px;
   height: 36px;

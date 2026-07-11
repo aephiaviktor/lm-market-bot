@@ -57,6 +57,7 @@ const depositCrewMessageEl = document.getElementById('deposit-crew-message');
 const depositCrewConfirmBtn = document.getElementById('deposit-crew-confirm-btn');
 const depositCrewCancelBtn = document.getElementById('deposit-crew-cancel-btn');
 const addRuleRowBtn = document.getElementById('add-rule-row-btn');
+const appVersionEl = document.getElementById('app-version');
 const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
 const sendRpcLimiterBtn = document.getElementById('send-rpc-limiter-btn');
 const rpcLimiterCurrentUrlEl = document.getElementById('rpc-limiter-current-url');
@@ -104,6 +105,10 @@ let availableUpdate = null;
 let updateCheckInFlight = false;
 let updateCheckPromise = null;
 let crewDepositStatus = null;
+
+if (appVersionEl) {
+  appVersionEl.textContent = `v${APP_VERSION}`;
+}
 
 const RAW_MATERIAL_START = 'Arco';
 const RAW_MATERIAL_END = 'Titanium Ore';
