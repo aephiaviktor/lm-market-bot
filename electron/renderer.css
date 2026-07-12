@@ -1093,11 +1093,13 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
   margin-bottom: 14px;
+  min-width: 0;
 }
 
 .hardware-transfer-summary input {
   width: 100%;
   min-width: 0;
+  max-width: 100%;
 }
 
 .deposit-crew-field,

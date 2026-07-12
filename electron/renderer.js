@@ -216,7 +216,7 @@ function renderHardwareTransferBalances() {
   for (const entry of balances) {
     const option = document.createElement('option');
     option.value = entry.key;
-    option.textContent = `${entry.name} (${entry.uiAmount})`;
+    option.textContent = `${entry.name} (${formatDecimalWithSeparators(entry.uiAmount)})`;
     option.dataset.mint = entry.mint;
     hardwareTransferTokenSelect.appendChild(option);
   }
@@ -225,8 +225,9 @@ function renderHardwareTransferBalances() {
 
 function renderHardwareTransferSelection() {
   const selected = getSelectedHardwareTransferBalance();
-  hardwareTransferBalanceEl.textContent = selected ? `${selected.uiAmount} ${selected.name}` : '—';
-  hardwareTransferAmountInput.placeholder = selected ? selected.uiAmount : '';
+  const availableAmount = selected ? formatDecimalWithSeparators(selected.uiAmount) : '';
+  hardwareTransferBalanceEl.textContent = selected ? `${availableAmount} ${selected.name}` : '—';
+  hardwareTransferAmountInput.placeholder = availableAmount;
   renderHardwareTransferRecipientState();
 }
 
@@ -999,6 +1000,63 @@ function formatIntegerWithSeparators(value) {
   }
   const grouped = new Intl.NumberFormat(undefined, { useGrouping: true }).format(Number(unsigned));
   return negative ? `-${grouped}` : grouped;
+}
+
+function formatDecimalWithSeparators(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const text = String(value).trim().replace(/,/g, '');
+  if (!text) {
+    return '';
+  }
+  if (!/^\d+(\.\d*)?$/.test(text)) {
+    return String(value);
+  }
+
+  const [whole, fraction] = text.split('.');
+  const groupedWhole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return fraction === undefined ? groupedWhole : `${groupedWhole}.${fraction}`;
+}
+
+function stripDecimalSeparators(value) {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return String(value).trim().replace(/,/g, '');
+}
+
+function formatDecimalInputValue(input) {
+  const raw = input.value;
+  const cursor = input.selectionStart ?? raw.length;
+  const digitsBeforeCursor = raw.slice(0, cursor).replace(/[^\d.]/g, '').length;
+  const stripped = stripDecimalSeparators(raw);
+  if (!/^\d*(\.\d*)?$/.test(stripped)) {
+    return;
+  }
+
+  const formatted = formatDecimalWithSeparators(stripped);
+  if (formatted === raw) {
+    return;
+  }
+
+  input.value = formatted;
+  let newCursor = formatted.length;
+  let digitsSeen = 0;
+  for (let i = 0; i < formatted.length; i += 1) {
+    if (digitsSeen >= digitsBeforeCursor) {
+      newCursor = i;
+      break;
+    }
+    if (/[\d.]/.test(formatted[i])) {
+      digitsSeen += 1;
+    }
+  }
+  try {
+    input.setSelectionRange(newCursor, newCursor);
+  } catch {
+    // ignore: not all input modes support selection APIs
+  }
 }
 
 function stripIntegerSeparators(value) {
@@ -1792,7 +1850,7 @@ hardwareTransferRefreshBtn.addEventListener('click', () => {
 hardwareTransferMaxBtn.addEventListener('click', () => {
   const selected = getSelectedHardwareTransferBalance();
   if (!selected) return;
-  hardwareTransferAmountInput.value = selected.uiAmount;
+  hardwareTransferAmountInput.value = formatDecimalWithSeparators(selected.uiAmount);
   renderHardwareTransferRecipientState();
 });
 
@@ -1804,7 +1862,10 @@ hardwareTransferRecipientInput.addEventListener('input', () => {
   renderHardwareTransferRecipientState();
 });
 
-hardwareTransferAmountInput.addEventListener('input', renderHardwareTransferRecipientState);
+hardwareTransferAmountInput.addEventListener('input', () => {
+  formatDecimalInputValue(hardwareTransferAmountInput);
+  renderHardwareTransferRecipientState();
+});
 hardwareTransferStoreRecipientInput.addEventListener('change', renderHardwareTransferRecipientState);
 hardwareTransferRecipientNameInput.addEventListener('input', renderHardwareTransferRecipientState);
 
@@ -1872,7 +1933,7 @@ hardwareTransferConfirmBtn.addEventListener('click', async () => {
       decimals: selected.decimals,
       amount: hardwareTransferAmountInput.value,
       availableAmount: selected.amount,
-      sendMax: hardwareTransferAmountInput.value === selected.uiAmount,
+      sendMax: stripDecimalSeparators(hardwareTransferAmountInput.value) === stripDecimalSeparators(selected.uiAmount),
       ledgerPath: hardwareTransferLedgerPathEl.value,
     });
 

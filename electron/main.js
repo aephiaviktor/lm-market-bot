@@ -724,24 +724,47 @@ function shortMint(value) {
 }
 
 async function signWithLedger(serializedTransaction, owner, ledgerPath, onProgress = () => undefined) {
-  onProgress('Connecting to the Ledger. Unlock it and open the Solana app...');
-  const transport = await TransportNodeHid.create();
-  try {
-    const solana = new LedgerSolana(transport);
-    onProgress('Checking the Ledger wallet path...');
-    const addressResult = await solana.getAddress(ledgerPath, false);
-    const ledgerAddress = new PublicKey(addressResult.address);
-    if (!ledgerAddress.equals(owner)) {
-      throw new Error(
-        `Ledger path ${ledgerPath} resolves to ${ledgerAddress.toBase58()}, but Managed Wallet is ${owner.toBase58()}.`,
-      );
-    }
-    onProgress('Approve the transfer on the Ledger...');
-    const signatureResult = await solana.signTransaction(ledgerPath, Buffer.from(serializedTransaction), 'ata');
-    return signatureResult.signature;
-  } finally {
-    await transport.close().catch(() => undefined);
+  onProgress('Looking for connected Ledger devices...');
+  const devicePaths = await TransportNodeHid.list();
+  if (!devicePaths.length) {
+    throw new Error('No Ledger device found. Connect and unlock the Ledger, then open the Solana app.');
   }
+
+  const errors = [];
+  for (let index = 0; index < devicePaths.length; index += 1) {
+    const devicePath = devicePaths[index];
+    const deviceLabel = devicePaths.length === 1 ? 'Ledger' : `Ledger ${index + 1} of ${devicePaths.length}`;
+    let transport = null;
+    try {
+      onProgress(`Checking ${deviceLabel}. Unlock it and open the Solana app...`);
+      transport = await TransportNodeHid.open(devicePath);
+      const solana = new LedgerSolana(transport);
+      const addressResult = await solana.getAddress(ledgerPath, false);
+      const ledgerAddress = new PublicKey(addressResult.address);
+      if (!ledgerAddress.equals(owner)) {
+        errors.push(`${deviceLabel}: path resolves to ${ledgerAddress.toBase58()}`);
+        continue;
+      }
+
+      onProgress(`Approve the transfer on ${deviceLabel}...`);
+      const signatureResult = await solana.signTransaction(ledgerPath, Buffer.from(serializedTransaction), 'ata');
+      return signatureResult.signature;
+    } catch (err) {
+      errors.push(`${deviceLabel}: ${err?.message || String(err)}`);
+    } finally {
+      if (transport) {
+        await transport.close().catch(() => undefined);
+      }
+    }
+  }
+
+  throw new Error(
+    [
+      `No connected Ledger matched Managed Wallet ${owner.toBase58()} at path ${ledgerPath}.`,
+      ...errors.slice(0, 4),
+      errors.length > 4 ? `...and ${errors.length - 4} more Ledger check result${errors.length - 4 === 1 ? '' : 's'}.` : '',
+    ].filter(Boolean).join(' '),
+  );
 }
 
 async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
