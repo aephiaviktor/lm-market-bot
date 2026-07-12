@@ -60,6 +60,7 @@ const depositCrewCancelBtn = document.getElementById('deposit-crew-cancel-btn');
 const hardwareTransferModal = document.getElementById('hardware-transfer-modal');
 const hardwareTransferOwnerEl = document.getElementById('hardware-transfer-owner');
 const hardwareTransferLedgerPathEl = document.getElementById('hardware-transfer-ledger-path');
+const hardwareTransferRecipientSelect = document.getElementById('hardware-transfer-recipient-select');
 const hardwareTransferRecipientInput = document.getElementById('hardware-transfer-recipient');
 const hardwareTransferRecipientList = document.getElementById('hardware-transfer-recipient-list');
 const hardwareTransferTokenSelect = document.getElementById('hardware-transfer-token');
@@ -201,12 +202,28 @@ function isLikelySolanaAddress(value) {
 
 function renderHardwareTransferRecipients() {
   hardwareTransferRecipientList.innerHTML = '';
+  hardwareTransferRecipientSelect.innerHTML = '';
+
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = hardwareTransferState.recipients.length
+    ? 'Choose saved recipient'
+    : 'No saved recipients';
+  hardwareTransferRecipientSelect.appendChild(placeholder);
+
   for (const recipient of hardwareTransferState.recipients) {
     const option = document.createElement('option');
     option.value = recipient.address;
     option.label = recipient.name;
     hardwareTransferRecipientList.appendChild(option);
+
+    const selectOption = document.createElement('option');
+    selectOption.value = recipient.address;
+    selectOption.textContent = recipient.name;
+    selectOption.title = recipient.address;
+    hardwareTransferRecipientSelect.appendChild(selectOption);
   }
+  hardwareTransferRecipientSelect.disabled = hardwareTransferState.recipients.length === 0;
 }
 
 function renderHardwareTransferBalances() {
@@ -259,6 +276,7 @@ function setHardwareTransferBusy(busy) {
   hardwareTransferCancelBtn.disabled = busy;
   hardwareTransferRefreshBtn.disabled = busy;
   hardwareTransferMaxBtn.disabled = busy;
+  hardwareTransferRecipientSelect.disabled = busy || hardwareTransferState.recipients.length === 0;
   hardwareTransferTokenSelect.disabled = busy;
   hardwareTransferRecipientInput.disabled = busy;
   hardwareTransferAmountInput.disabled = busy;
@@ -303,6 +321,7 @@ async function refreshHardwareTransferBalances() {
 
 async function openHardwareTransferDialog() {
   hardwareTransferRecipientInput.value = '';
+  hardwareTransferRecipientSelect.value = '';
   hardwareTransferAmountInput.value = '';
   hardwareTransferRecipientNameInput.value = '';
   hardwareTransferUnsignedPayloadEl.value = '';
@@ -1912,6 +1931,15 @@ hardwareTransferRecipientInput.addEventListener('input', () => {
   if (knownRecipient) {
     hardwareTransferRecipientNameInput.value = knownRecipient.name;
   }
+  hardwareTransferRecipientSelect.value = knownRecipient?.address || '';
+  renderHardwareTransferRecipientState();
+});
+
+hardwareTransferRecipientSelect.addEventListener('change', () => {
+  const selectedAddress = String(hardwareTransferRecipientSelect.value || '').trim();
+  const knownRecipient = getKnownRecipient(selectedAddress);
+  hardwareTransferRecipientInput.value = selectedAddress;
+  hardwareTransferRecipientNameInput.value = knownRecipient?.name || '';
   renderHardwareTransferRecipientState();
 });
 
