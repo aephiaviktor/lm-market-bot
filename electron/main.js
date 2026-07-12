@@ -723,10 +723,12 @@ function shortMint(value) {
   return text.length > 14 ? `${text.slice(0, 6)}...${text.slice(-6)}` : text;
 }
 
-async function signWithLedger(serializedMessage, owner, ledgerPath) {
+async function signWithLedger(serializedTransaction, owner, ledgerPath, onProgress = () => undefined) {
+  onProgress('Connecting to the Ledger. Unlock it and open the Solana app...');
   const transport = await TransportNodeHid.create();
   try {
     const solana = new LedgerSolana(transport);
+    onProgress('Checking the Ledger wallet path...');
     const addressResult = await solana.getAddress(ledgerPath, false);
     const ledgerAddress = new PublicKey(addressResult.address);
     if (!ledgerAddress.equals(owner)) {
@@ -734,14 +736,16 @@ async function signWithLedger(serializedMessage, owner, ledgerPath) {
         `Ledger path ${ledgerPath} resolves to ${ledgerAddress.toBase58()}, but Managed Wallet is ${owner.toBase58()}.`,
       );
     }
-    const signatureResult = await solana.signTransaction(ledgerPath, Buffer.from(serializedMessage));
+    onProgress('Approve the transfer on the Ledger...');
+    const signatureResult = await solana.signTransaction(ledgerPath, Buffer.from(serializedTransaction), 'ata');
     return signatureResult.signature;
   } finally {
     await transport.close().catch(() => undefined);
   }
 }
 
-async function sendHardwareWalletToken(payload) {
+async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
+  onProgress('Preparing the token transfer...');
   const { connection, owner, feePayer } = await getHardwareTransferConfig();
   const recipient = new PublicKey(String(payload?.recipient || '').trim());
   const mint = new PublicKey(String(payload?.mint || '').trim());
@@ -796,13 +800,20 @@ async function sendHardwareWalletToken(payload) {
   transaction.recentBlockhash = blockhash.blockhash;
   transaction.partialSign(feePayer);
 
-  const ledgerSignature = await signWithLedger(transaction.serializeMessage(), owner, ledgerPath);
+  const ledgerSignature = await signWithLedger(
+    transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
+    owner,
+    ledgerPath,
+    onProgress,
+  );
   transaction.addSignature(owner, ledgerSignature);
 
+  onProgress('Sending the signed transfer...');
   const signature = await connection.sendRawTransaction(transaction.serialize(), {
     skipPreflight: false,
     preflightCommitment: 'confirmed',
   });
+  onProgress('Confirming the transfer...');
   await connection.confirmTransaction(
     {
       signature,
@@ -1446,8 +1457,11 @@ ipcMain.handle('hardware-transfer:save-recipient', async (_event, payload) => {
 });
 
 ipcMain.handle('hardware-transfer:send', async (_event, payload) => {
+  const sendProgress = (message) => {
+    _event.sender.send('hardware-transfer:progress', { message });
+  };
   try {
-    const result = await sendHardwareWalletToken(payload || {});
+    const result = await sendHardwareWalletToken(payload || {}, sendProgress);
     logger.info(
       `Hardware wallet token transfer sent ${result.amount} of ${result.mint} to ${result.recipient}: ${result.signature}`,
     );

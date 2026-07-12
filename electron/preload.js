@@ -25,6 +25,11 @@ contextBridge.exposeInMainWorld('botApi', {
   refreshHardwareWalletBalances: () => ipcRenderer.invoke('hardware-transfer:balances'),
   sendHardwareWalletToken: (payload) => ipcRenderer.invoke('hardware-transfer:send', payload),
   saveHardwareWalletRecipient: (payload) => ipcRenderer.invoke('hardware-transfer:save-recipient', payload),
+  onHardwareWalletTransferProgress: (handler) => {
+    const wrapped = (_event, payload) => handler(payload);
+    ipcRenderer.on('hardware-transfer:progress', wrapped);
+    return () => ipcRenderer.removeListener('hardware-transfer:progress', wrapped);
+  },
   getBotStatus: () => ipcRenderer.invoke('bot:status'),
   rerunAssets: (assets) => ipcRenderer.invoke('bot:rerun-assets', assets),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),

@@ -1090,9 +1090,14 @@ button:disabled {
 
 .hardware-transfer-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
   margin-bottom: 14px;
+}
+
+.hardware-transfer-summary input {
+  width: 100%;
+  min-width: 0;
 }
 
 .deposit-crew-field,

@@ -1854,8 +1854,15 @@ hardwareTransferConfirmBtn.addEventListener('click', async () => {
   const shouldStoreRecipient = Boolean(hardwareTransferStoreRecipientInput.checked && recipient && !knownRecipient);
 
   setHardwareTransferBusy(true);
-  hardwareTransferMessageEl.textContent = 'Approve the transfer on the Ledger...';
+  hardwareTransferMessageEl.textContent = 'Preparing the token transfer...';
   appendLog(`[${new Date().toISOString()}] [INFO] Hardware wallet token transfer requested for ${selected.name}.`);
+
+  const stopHardwareTransferProgress = window.botApi.onHardwareWalletTransferProgress?.((payload) => {
+    const message = String(payload?.message || '').trim();
+    if (message) {
+      hardwareTransferMessageEl.textContent = message;
+    }
+  });
 
   try {
     const result = await window.botApi.sendHardwareWalletToken({
@@ -1896,6 +1903,7 @@ hardwareTransferConfirmBtn.addEventListener('click', async () => {
     hardwareTransferMessageEl.textContent = `Transfer failed: ${err?.message || String(err)}`;
     appendLog(`[${new Date().toISOString()}] [ERROR] Hardware wallet token transfer failed: ${err?.message || String(err)}`);
   } finally {
+    stopHardwareTransferProgress?.();
     setHardwareTransferBusy(false);
     renderHardwareTransferRecipientState();
   }
