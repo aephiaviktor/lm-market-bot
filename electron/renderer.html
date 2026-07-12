@@ -369,6 +369,27 @@
           <input id="hardware-transfer-recipient-name" type="text" autocomplete="off" placeholder="Name for local address book" />
         </label>
 
+        <details class="hardware-transfer-handoff">
+          <summary>Sign on another PC</summary>
+          <div class="hardware-transfer-handoff-grid">
+            <section>
+              <h3>Bot PC</h3>
+              <button id="hardware-transfer-export-btn" type="button" disabled>Create unsigned payload</button>
+              <textarea id="hardware-transfer-unsigned-payload" rows="4" readonly spellcheck="false" placeholder="Unsigned payload appears here. Paste it into the Ledger PC signer."></textarea>
+              <button id="hardware-transfer-copy-unsigned-btn" type="button" disabled>Copy unsigned</button>
+              <textarea id="hardware-transfer-signed-payload" rows="4" spellcheck="false" placeholder="Paste signed payload here, then broadcast from this bot PC."></textarea>
+              <button id="hardware-transfer-broadcast-btn" type="button">Broadcast signed transfer</button>
+            </section>
+            <section>
+              <h3>Ledger PC</h3>
+              <textarea id="hardware-transfer-signer-input" rows="4" spellcheck="false" placeholder="Paste unsigned payload here on the PC with the Ledger."></textarea>
+              <button id="hardware-transfer-sign-payload-btn" type="button">Sign with local Ledger</button>
+              <textarea id="hardware-transfer-signer-output" rows="4" readonly spellcheck="false" placeholder="Signed payload appears here. Paste it back into the bot PC."></textarea>
+              <button id="hardware-transfer-copy-signed-btn" type="button" disabled>Copy signed</button>
+            </section>
+          </div>
+        </details>
+
         <p class="update-message" id="hardware-transfer-message">Connect and unlock the Ledger with the Solana app open before sending.</p>
         <div class="update-dialog-actions">
           <button id="hardware-transfer-confirm-btn" type="button" disabled>Send</button>

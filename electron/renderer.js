@@ -73,6 +73,15 @@ const hardwareTransferRecipientNameInput = document.getElementById('hardware-tra
 const hardwareTransferMessageEl = document.getElementById('hardware-transfer-message');
 const hardwareTransferConfirmBtn = document.getElementById('hardware-transfer-confirm-btn');
 const hardwareTransferCancelBtn = document.getElementById('hardware-transfer-cancel-btn');
+const hardwareTransferExportBtn = document.getElementById('hardware-transfer-export-btn');
+const hardwareTransferUnsignedPayloadEl = document.getElementById('hardware-transfer-unsigned-payload');
+const hardwareTransferCopyUnsignedBtn = document.getElementById('hardware-transfer-copy-unsigned-btn');
+const hardwareTransferSignedPayloadEl = document.getElementById('hardware-transfer-signed-payload');
+const hardwareTransferBroadcastBtn = document.getElementById('hardware-transfer-broadcast-btn');
+const hardwareTransferSignerInputEl = document.getElementById('hardware-transfer-signer-input');
+const hardwareTransferSignPayloadBtn = document.getElementById('hardware-transfer-sign-payload-btn');
+const hardwareTransferSignerOutputEl = document.getElementById('hardware-transfer-signer-output');
+const hardwareTransferCopySignedBtn = document.getElementById('hardware-transfer-copy-signed-btn');
 const addRuleRowBtn = document.getElementById('add-rule-row-btn');
 const appVersionEl = document.getElementById('app-version');
 const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
@@ -241,10 +250,12 @@ function renderHardwareTransferRecipientState() {
     !isLikelySolanaAddress(recipient) ||
     !String(hardwareTransferAmountInput.value || '').trim() ||
     (shouldStore && !String(hardwareTransferRecipientNameInput.value || '').trim());
+  hardwareTransferExportBtn.disabled = hardwareTransferConfirmBtn.disabled;
 }
 
 function setHardwareTransferBusy(busy) {
   hardwareTransferConfirmBtn.disabled = busy;
+  hardwareTransferExportBtn.disabled = busy;
   hardwareTransferCancelBtn.disabled = busy;
   hardwareTransferRefreshBtn.disabled = busy;
   hardwareTransferMaxBtn.disabled = busy;
@@ -253,6 +264,8 @@ function setHardwareTransferBusy(busy) {
   hardwareTransferAmountInput.disabled = busy;
   hardwareTransferStoreRecipientInput.disabled = busy;
   hardwareTransferRecipientNameInput.disabled = busy;
+  hardwareTransferBroadcastBtn.disabled = busy;
+  hardwareTransferSignPayloadBtn.disabled = busy;
 }
 
 function applyHardwareTransferState(state) {
@@ -292,6 +305,12 @@ async function openHardwareTransferDialog() {
   hardwareTransferRecipientInput.value = '';
   hardwareTransferAmountInput.value = '';
   hardwareTransferRecipientNameInput.value = '';
+  hardwareTransferUnsignedPayloadEl.value = '';
+  hardwareTransferSignedPayloadEl.value = '';
+  hardwareTransferSignerInputEl.value = '';
+  hardwareTransferSignerOutputEl.value = '';
+  hardwareTransferCopyUnsignedBtn.disabled = true;
+  hardwareTransferCopySignedBtn.disabled = true;
   hardwareTransferStoreRecipientInput.checked = true;
   hardwareTransferMessageEl.textContent = 'Checking handler wallet balances...';
   setHardwareTransferModalOpen(true);
@@ -309,6 +328,40 @@ async function openHardwareTransferDialog() {
   } finally {
     setHardwareTransferBusy(false);
     renderHardwareTransferRecipientState();
+  }
+}
+
+function getHardwareTransferRequestPayload() {
+  const selected = getSelectedHardwareTransferBalance();
+  if (!selected) {
+    throw new Error('Select a token first.');
+  }
+
+  return {
+    selected,
+    payload: {
+      recipient: String(hardwareTransferRecipientInput.value || '').trim(),
+      mint: selected.mint,
+      tokenProgramId: selected.tokenProgramId,
+      decimals: selected.decimals,
+      amount: hardwareTransferAmountInput.value,
+      availableAmount: selected.amount,
+      sendMax: stripDecimalSeparators(hardwareTransferAmountInput.value) === stripDecimalSeparators(selected.uiAmount),
+      ledgerPath: hardwareTransferLedgerPathEl.value,
+    },
+  };
+}
+
+async function copyTextToClipboard(text, element) {
+  const value = String(text || '');
+  if (!value) return false;
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    element?.focus();
+    element?.select();
+    return false;
   }
 }
 
@@ -1869,6 +1922,128 @@ hardwareTransferAmountInput.addEventListener('input', () => {
 hardwareTransferStoreRecipientInput.addEventListener('change', renderHardwareTransferRecipientState);
 hardwareTransferRecipientNameInput.addEventListener('input', renderHardwareTransferRecipientState);
 
+hardwareTransferExportBtn.addEventListener('click', async () => {
+  setHardwareTransferBusy(true);
+  hardwareTransferMessageEl.textContent = 'Creating unsigned transfer payload...';
+  appendLog(`[${new Date().toISOString()}] [INFO] Hardware wallet transfer payload export requested.`);
+
+  const stopHardwareTransferProgress = window.botApi.onHardwareWalletTransferProgress?.((payload) => {
+    const message = String(payload?.message || '').trim();
+    if (message) {
+      hardwareTransferMessageEl.textContent = message;
+    }
+  });
+
+  try {
+    const { payload } = getHardwareTransferRequestPayload();
+    const result = await window.botApi.createHardwareWalletTransferPayload(payload);
+    if (!result?.ok) {
+      hardwareTransferMessageEl.textContent = result?.message || 'Payload export failed.';
+      appendLog(`[${new Date().toISOString()}] [WARN] Hardware wallet transfer payload export failed: ${result?.message || 'unknown error'}`);
+      return;
+    }
+
+    hardwareTransferUnsignedPayloadEl.value = result.payload || '';
+    hardwareTransferCopyUnsignedBtn.disabled = !hardwareTransferUnsignedPayloadEl.value;
+    hardwareTransferMessageEl.textContent = 'Unsigned payload created. Copy it to the PC with the Ledger.';
+    appendLog(`[${new Date().toISOString()}] [INFO] Hardware wallet unsigned payload created.`);
+  } catch (err) {
+    hardwareTransferMessageEl.textContent = `Payload export failed: ${err?.message || String(err)}`;
+    appendLog(`[${new Date().toISOString()}] [ERROR] Hardware wallet transfer payload export failed: ${err?.message || String(err)}`);
+  } finally {
+    stopHardwareTransferProgress?.();
+    setHardwareTransferBusy(false);
+    renderHardwareTransferRecipientState();
+  }
+});
+
+hardwareTransferCopyUnsignedBtn.addEventListener('click', async () => {
+  const copied = await copyTextToClipboard(hardwareTransferUnsignedPayloadEl.value, hardwareTransferUnsignedPayloadEl);
+  hardwareTransferMessageEl.textContent = copied
+    ? 'Unsigned payload copied.'
+    : 'Could not copy automatically. The unsigned payload is selected.';
+});
+
+hardwareTransferSignPayloadBtn.addEventListener('click', async () => {
+  setHardwareTransferBusy(true);
+  hardwareTransferMessageEl.textContent = 'Preparing Ledger signing on this PC...';
+  appendLog(`[${new Date().toISOString()}] [INFO] External hardware wallet payload signing requested.`);
+
+  const stopHardwareTransferProgress = window.botApi.onHardwareWalletTransferProgress?.((payload) => {
+    const message = String(payload?.message || '').trim();
+    if (message) {
+      hardwareTransferMessageEl.textContent = message;
+    }
+  });
+
+  try {
+    const result = await window.botApi.signHardwareWalletTransferPayload({
+      payload: hardwareTransferSignerInputEl.value,
+      ledgerPath: hardwareTransferLedgerPathEl.value,
+    });
+    if (!result?.ok) {
+      hardwareTransferMessageEl.textContent = result?.message || 'Payload signing failed.';
+      appendLog(`[${new Date().toISOString()}] [WARN] External hardware wallet payload signing failed: ${result?.message || 'unknown error'}`);
+      return;
+    }
+
+    hardwareTransferSignerOutputEl.value = result.payload || '';
+    hardwareTransferCopySignedBtn.disabled = !hardwareTransferSignerOutputEl.value;
+    hardwareTransferMessageEl.textContent = 'Signed payload created. Copy it back to the bot PC.';
+    appendLog(`[${new Date().toISOString()}] [INFO] External hardware wallet payload signed.`);
+  } catch (err) {
+    hardwareTransferMessageEl.textContent = `Payload signing failed: ${err?.message || String(err)}`;
+    appendLog(`[${new Date().toISOString()}] [ERROR] External hardware wallet payload signing failed: ${err?.message || String(err)}`);
+  } finally {
+    stopHardwareTransferProgress?.();
+    setHardwareTransferBusy(false);
+    renderHardwareTransferRecipientState();
+  }
+});
+
+hardwareTransferCopySignedBtn.addEventListener('click', async () => {
+  const copied = await copyTextToClipboard(hardwareTransferSignerOutputEl.value, hardwareTransferSignerOutputEl);
+  hardwareTransferMessageEl.textContent = copied
+    ? 'Signed payload copied.'
+    : 'Could not copy automatically. The signed payload is selected.';
+});
+
+hardwareTransferBroadcastBtn.addEventListener('click', async () => {
+  setHardwareTransferBusy(true);
+  hardwareTransferMessageEl.textContent = 'Broadcasting signed transfer...';
+  appendLog(`[${new Date().toISOString()}] [INFO] Signed hardware wallet transfer broadcast requested.`);
+
+  const stopHardwareTransferProgress = window.botApi.onHardwareWalletTransferProgress?.((payload) => {
+    const message = String(payload?.message || '').trim();
+    if (message) {
+      hardwareTransferMessageEl.textContent = message;
+    }
+  });
+
+  try {
+    const result = await window.botApi.broadcastHardwareWalletTransferPayload({
+      payload: hardwareTransferSignedPayloadEl.value,
+    });
+    if (!result?.ok) {
+      hardwareTransferMessageEl.textContent = result?.message || 'Signed transfer broadcast failed.';
+      appendLog(`[${new Date().toISOString()}] [WARN] Signed hardware wallet transfer broadcast failed: ${result?.message || 'unknown error'}`);
+      return;
+    }
+
+    hardwareTransferMessageEl.textContent = `Transfer sent: ${result.signature}`;
+    appendLog(`[${new Date().toISOString()}] [INFO] Signed hardware wallet transfer sent: ${result.signature}`);
+    await refreshHardwareTransferBalances();
+    await refreshBotStatus();
+  } catch (err) {
+    hardwareTransferMessageEl.textContent = `Signed transfer broadcast failed: ${err?.message || String(err)}`;
+    appendLog(`[${new Date().toISOString()}] [ERROR] Signed hardware wallet transfer broadcast failed: ${err?.message || String(err)}`);
+  } finally {
+    stopHardwareTransferProgress?.();
+    setHardwareTransferBusy(false);
+    renderHardwareTransferRecipientState();
+  }
+});
+
 depositCrewCountInput.addEventListener('input', () => {
   renderDepositCrewStatus(crewDepositStatus);
 });
@@ -1907,8 +2082,7 @@ depositCrewConfirmBtn.addEventListener('click', async () => {
 });
 
 hardwareTransferConfirmBtn.addEventListener('click', async () => {
-  const selected = getSelectedHardwareTransferBalance();
-  if (!selected) return;
+  const { selected, payload } = getHardwareTransferRequestPayload();
 
   const recipient = String(hardwareTransferRecipientInput.value || '').trim();
   const knownRecipient = getKnownRecipient(recipient);
@@ -1926,16 +2100,7 @@ hardwareTransferConfirmBtn.addEventListener('click', async () => {
   });
 
   try {
-    const result = await window.botApi.sendHardwareWalletToken({
-      recipient,
-      mint: selected.mint,
-      tokenProgramId: selected.tokenProgramId,
-      decimals: selected.decimals,
-      amount: hardwareTransferAmountInput.value,
-      availableAmount: selected.amount,
-      sendMax: stripDecimalSeparators(hardwareTransferAmountInput.value) === stripDecimalSeparators(selected.uiAmount),
-      ledgerPath: hardwareTransferLedgerPathEl.value,
-    });
+    const result = await window.botApi.sendHardwareWalletToken(payload);
 
     if (!result?.ok) {
       hardwareTransferMessageEl.textContent = result?.message || 'Transfer failed.';

@@ -555,6 +555,41 @@ function getDefaultLedgerPath() {
   return "44'/501'/0'";
 }
 
+function isWslEnvironment() {
+  return process.platform === 'linux' && /microsoft|wsl/i.test(os.release());
+}
+
+function getVisibleHidDeviceCount() {
+  try {
+    // node-hid is provided by the Ledger HID transport dependency.
+    // This is only used to make the no-device error more precise.
+    const hid = require('node-hid');
+    const devices = hid.devices();
+    return Array.isArray(devices) ? devices.length : null;
+  } catch {
+    return null;
+  }
+}
+
+function getNoLedgerDeviceMessage() {
+  const hidCount = getVisibleHidDeviceCount();
+  const parts = [
+    'No Ledger device found by the app.',
+  ];
+
+  if (hidCount === 0) {
+    parts.push('No HID devices are visible to this process.');
+  }
+
+  if (isWslEnvironment()) {
+    parts.push('This app is running inside WSL2, so Windows may see the Ledger while WSL cannot. Attach the Ledger USB device to WSL, or run the app from an environment that can see the Ledger.');
+  } else {
+    parts.push('Connect and unlock the Ledger, then open the Solana app.');
+  }
+
+  return parts.join(' ');
+}
+
 function getAssetNameByMint(mint) {
   const mintKey = String(mint || '').trim();
   if (!mintKey) return '';
@@ -661,6 +696,39 @@ function normalizeTokenProgramId(value) {
   return TOKEN_PROGRAM_ID;
 }
 
+function encodeTransferHandoffPayload(payload) {
+  return JSON.stringify(payload, null, 2);
+}
+
+function parseTransferHandoffPayload(rawPayload, expectedType) {
+  const text = String(rawPayload || '').trim();
+  if (!text) {
+    throw new Error('Signing payload is empty.');
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`Signing payload is not valid JSON: ${err?.message || String(err)}`);
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Signing payload must be a JSON object.');
+  }
+  if (parsed.type !== expectedType) {
+    throw new Error(`Signing payload type must be ${expectedType}.`);
+  }
+  if (parsed.version !== 1) {
+    throw new Error(`Unsupported signing payload version: ${parsed.version || 'unknown'}.`);
+  }
+  if (!parsed.transaction || typeof parsed.transaction !== 'string') {
+    throw new Error('Signing payload is missing the transaction.');
+  }
+
+  return parsed;
+}
+
 function createConnectionFromConfig(config) {
   const endpoint = String(config?.RPC_URL || '').trim();
   if (!endpoint) {
@@ -727,7 +795,7 @@ async function signWithLedger(serializedTransaction, owner, ledgerPath, onProgre
   onProgress('Looking for connected Ledger devices...');
   const devicePaths = await TransportNodeHid.list();
   if (!devicePaths.length) {
-    throw new Error('No Ledger device found. Connect and unlock the Ledger, then open the Solana app.');
+    throw new Error(getNoLedgerDeviceMessage());
   }
 
   const errors = [];
@@ -767,7 +835,7 @@ async function signWithLedger(serializedTransaction, owner, ledgerPath, onProgre
   );
 }
 
-async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
+async function buildHardwareWalletTokenTransfer(payload, onProgress = () => undefined) {
   onProgress('Preparing the token transfer...');
   const { connection, owner, feePayer } = await getHardwareTransferConfig();
   const recipient = new PublicKey(String(payload?.recipient || '').trim());
@@ -823,6 +891,63 @@ async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
   transaction.recentBlockhash = blockhash.blockhash;
   transaction.partialSign(feePayer);
 
+  return {
+    connection,
+    transaction,
+    owner,
+    recipient,
+    mint,
+    tokenProgramId,
+    blockhash,
+    ledgerPath,
+    amount,
+    decimals,
+    tokenName: getAssetNameByMint(mint.toBase58()) || shortMint(mint.toBase58()),
+    feePayer: feePayer.publicKey,
+  };
+}
+
+async function createHardwareWalletTransferPayload(payload, onProgress = () => undefined) {
+  const transfer = await buildHardwareWalletTokenTransfer(payload, onProgress);
+  const amount = formatBaseUnits(transfer.amount, transfer.decimals);
+  const transaction = transfer.transaction.serialize({
+    requireAllSignatures: false,
+    verifySignatures: false,
+  });
+
+  return {
+    ok: true,
+    payload: encodeTransferHandoffPayload({
+      type: 'lm-market-bot.hardware-transfer.unsigned',
+      version: 1,
+      createdAt: new Date().toISOString(),
+      ledgerPath: transfer.ledgerPath,
+      ownerWallet: transfer.owner.toBase58(),
+      transaction: transaction.toString('base64'),
+      summary: {
+        token: transfer.tokenName,
+        amount,
+        mint: transfer.mint.toBase58(),
+        recipient: transfer.recipient.toBase58(),
+        feePayer: transfer.feePayer.toBase58(),
+        tokenProgramId: transfer.tokenProgramId.toBase58(),
+      },
+      confirmation: {
+        blockhash: transfer.blockhash.blockhash,
+        lastValidBlockHeight: transfer.blockhash.lastValidBlockHeight,
+      },
+    }),
+    amount,
+    mint: transfer.mint.toBase58(),
+    recipient: transfer.recipient.toBase58(),
+  };
+}
+
+async function signHardwareWalletTransferPayload(rawPayload, ledgerPathOverride, onProgress = () => undefined) {
+  const parsed = parseTransferHandoffPayload(rawPayload, 'lm-market-bot.hardware-transfer.unsigned');
+  const owner = new PublicKey(String(parsed.ownerWallet || '').trim());
+  const transaction = Transaction.from(Buffer.from(parsed.transaction, 'base64'));
+  const ledgerPath = String(ledgerPathOverride || parsed.ledgerPath || getDefaultLedgerPath()).trim() || getDefaultLedgerPath();
   const ledgerSignature = await signWithLedger(
     transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
     owner,
@@ -831,17 +956,72 @@ async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
   );
   transaction.addSignature(owner, ledgerSignature);
 
+  return {
+    ok: true,
+    payload: encodeTransferHandoffPayload({
+      type: 'lm-market-bot.hardware-transfer.signed',
+      version: 1,
+      signedAt: new Date().toISOString(),
+      ledgerPath,
+      ownerWallet: owner.toBase58(),
+      transaction: transaction.serialize().toString('base64'),
+      summary: parsed.summary || {},
+      confirmation: parsed.confirmation || {},
+    }),
+    summary: parsed.summary || {},
+  };
+}
+
+async function broadcastHardwareWalletTransferPayload(rawPayload, onProgress = () => undefined) {
+  const parsed = parseTransferHandoffPayload(rawPayload, 'lm-market-bot.hardware-transfer.signed');
+  onProgress('Broadcasting the signed transfer...');
+  const { connection } = await getHardwareTransferConfig();
+  const rawTransaction = Buffer.from(parsed.transaction, 'base64');
+  const signature = await connection.sendRawTransaction(rawTransaction, {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed',
+  });
+
+  if (parsed.confirmation?.blockhash && parsed.confirmation?.lastValidBlockHeight) {
+    onProgress('Confirming the transfer...');
+    await connection.confirmTransaction(
+      {
+        signature,
+        blockhash: String(parsed.confirmation.blockhash),
+        lastValidBlockHeight: Number(parsed.confirmation.lastValidBlockHeight),
+      },
+      'confirmed',
+    );
+  }
+
+  return {
+    ok: true,
+    signature,
+    summary: parsed.summary || {},
+  };
+}
+
+async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
+  const transfer = await buildHardwareWalletTokenTransfer(payload, onProgress);
+  const ledgerSignature = await signWithLedger(
+    transfer.transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
+    transfer.owner,
+    transfer.ledgerPath,
+    onProgress,
+  );
+  transfer.transaction.addSignature(transfer.owner, ledgerSignature);
+
   onProgress('Sending the signed transfer...');
-  const signature = await connection.sendRawTransaction(transaction.serialize(), {
+  const signature = await transfer.connection.sendRawTransaction(transfer.transaction.serialize(), {
     skipPreflight: false,
     preflightCommitment: 'confirmed',
   });
   onProgress('Confirming the transfer...');
-  await connection.confirmTransaction(
+  await transfer.connection.confirmTransaction(
     {
       signature,
-      blockhash: blockhash.blockhash,
-      lastValidBlockHeight: blockhash.lastValidBlockHeight,
+      blockhash: transfer.blockhash.blockhash,
+      lastValidBlockHeight: transfer.blockhash.lastValidBlockHeight,
     },
     'confirmed',
   );
@@ -849,9 +1029,9 @@ async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
   return {
     ok: true,
     signature,
-    amount: formatBaseUnits(amount, decimals),
-    mint: mint.toBase58(),
-    recipient: recipient.toBase58(),
+    amount: formatBaseUnits(transfer.amount, transfer.decimals),
+    mint: transfer.mint.toBase58(),
+    recipient: transfer.recipient.toBase58(),
   };
 }
 
@@ -1491,6 +1671,53 @@ ipcMain.handle('hardware-transfer:send', async (_event, payload) => {
     return result;
   } catch (err) {
     logger.error('Hardware wallet token transfer failed:', err);
+    return {
+      ok: false,
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('hardware-transfer:create-payload', async (_event, payload) => {
+  const sendProgress = (message) => {
+    _event.sender.send('hardware-transfer:progress', { message });
+  };
+  try {
+    return await createHardwareWalletTransferPayload(payload || {}, sendProgress);
+  } catch (err) {
+    logger.error('Hardware wallet transfer payload export failed:', err);
+    return {
+      ok: false,
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('hardware-transfer:sign-payload', async (_event, payload) => {
+  const sendProgress = (message) => {
+    _event.sender.send('hardware-transfer:progress', { message });
+  };
+  try {
+    return await signHardwareWalletTransferPayload(payload?.payload, payload?.ledgerPath, sendProgress);
+  } catch (err) {
+    logger.error('Hardware wallet transfer payload signing failed:', err);
+    return {
+      ok: false,
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('hardware-transfer:broadcast-payload', async (_event, payload) => {
+  const sendProgress = (message) => {
+    _event.sender.send('hardware-transfer:progress', { message });
+  };
+  try {
+    const result = await broadcastHardwareWalletTransferPayload(payload?.payload, sendProgress);
+    logger.info(`Hardware wallet signed transfer broadcast: ${result.signature}`);
+    return result;
+  } catch (err) {
+    logger.error('Hardware wallet signed transfer broadcast failed:', err);
     return {
       ok: false,
       message: err?.message || String(err),
