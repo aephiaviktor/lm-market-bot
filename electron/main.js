@@ -5,7 +5,23 @@ const fsSync = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 const lockfile = require('proper-lockfile');
-const { Keypair } = require('@solana/web3.js');
+const {
+  Connection,
+  Keypair,
+  PublicKey,
+  Transaction,
+} = require('@solana/web3.js');
+const {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentInstruction,
+  createTransferCheckedInstruction,
+  createTransferCheckedWithTransferHookInstruction,
+  getAssociatedTokenAddress,
+} = require('@solana/spl-token');
+const LedgerSolana = require('@ledgerhq/hw-app-solana').default;
+const TransportNodeHid = require('@ledgerhq/hw-transport-node-hid').default;
 const bs58 = require('bs58');
 const packageJson = require('../package.json');
 const APP_VERSION = packageJson.version || 'unknown';
@@ -113,7 +129,11 @@ const {
   bumpRevision: bumpRpcLimiterRevision,
 } = require('rpc_limiter/dist/state');
 const { LmMarketBot, buildBotConfig, getEditableConfigFromEnv, EDITABLE_CONFIG_KEYS } = require('../dist/bot');
-const { formatAssetRegistryResourceList, loadAssetRegistryForAephiaKey } = require('../dist/asset-registry');
+const {
+  GM_MARKET_ASSET_REGISTRY,
+  formatAssetRegistryResourceList,
+  loadAssetRegistryForAephiaKey,
+} = require('../dist/asset-registry');
 
 let mainWindow = null;
 let bot = null;
@@ -525,6 +545,280 @@ function getSettingsPath() {
 
 function getSettingsBackupPath() {
   return path.join(app.getPath('userData'), 'settings.previous.json');
+}
+
+function getRecipientsPath() {
+  return path.join(app.getPath('userData'), 'recipients.json');
+}
+
+function getDefaultLedgerPath() {
+  return "44'/501'/0'";
+}
+
+function getAssetNameByMint(mint) {
+  const mintKey = String(mint || '').trim();
+  if (!mintKey) return '';
+  const entry = GM_MARKET_ASSET_REGISTRY.find((asset) => asset.mint === mintKey);
+  return entry?.name || '';
+}
+
+function normalizeRecipientEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  const seen = new Set();
+  return entries
+    .map((entry) => {
+      const address = String(entry?.address || '').trim();
+      const name = String(entry?.name || '').trim();
+      if (!address || !name || seen.has(address)) {
+        return null;
+      }
+      seen.add(address);
+      return {
+        name: name.slice(0, 80),
+        address,
+        updatedAt: String(entry?.updatedAt || new Date().toISOString()),
+      };
+    })
+    .filter(Boolean);
+}
+
+async function loadRecipients() {
+  try {
+    const raw = await fs.readFile(getRecipientsPath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    return normalizeRecipientEntries(parsed?.recipients);
+  } catch {
+    return [];
+  }
+}
+
+async function saveRecipient(payload) {
+  const address = String(payload?.address || '').trim();
+  const name = String(payload?.name || '').trim();
+  if (!name) {
+    throw new Error('Recipient name is required.');
+  }
+
+  try {
+    new PublicKey(address);
+  } catch {
+    throw new Error('Recipient address is not a valid Solana address.');
+  }
+
+  const recipients = await loadRecipients();
+  const next = normalizeRecipientEntries([
+    { name, address, updatedAt: new Date().toISOString() },
+    ...recipients.filter((entry) => entry.address !== address),
+  ]);
+
+  const recipientsPath = getRecipientsPath();
+  await fs.mkdir(path.dirname(recipientsPath), { recursive: true });
+  await fs.writeFile(recipientsPath, JSON.stringify({ recipients: next }, null, 2), 'utf8');
+  return next;
+}
+
+function parseTokenAmountToBaseUnits(rawAmount, decimals) {
+  const text = String(rawAmount ?? '').trim().replace(/,/g, '');
+  if (!/^\d+(\.\d+)?$/.test(text)) {
+    throw new Error('Amount must be a positive number.');
+  }
+
+  const [whole, fraction = ''] = text.split('.');
+  const decimalPlaces = Math.max(0, Number(decimals) || 0);
+  if (fraction.length > decimalPlaces) {
+    throw new Error(`Amount has more than ${decimalPlaces} decimal place${decimalPlaces === 1 ? '' : 's'}.`);
+  }
+
+  const paddedFraction = fraction.padEnd(decimalPlaces, '0');
+  const baseUnits = BigInt(whole || '0') * (10n ** BigInt(decimalPlaces)) + BigInt(paddedFraction || '0');
+  if (baseUnits <= 0n) {
+    throw new Error('Amount must be greater than 0.');
+  }
+  return baseUnits;
+}
+
+function formatBaseUnits(rawAmount, decimals) {
+  const value = BigInt(rawAmount || '0');
+  const decimalPlaces = Math.max(0, Number(decimals) || 0);
+  if (decimalPlaces === 0) {
+    return value.toString();
+  }
+
+  const scale = 10n ** BigInt(decimalPlaces);
+  const whole = value / scale;
+  const fraction = (value % scale).toString().padStart(decimalPlaces, '0').replace(/0+$/, '');
+  return fraction ? `${whole.toString()}.${fraction}` : whole.toString();
+}
+
+function normalizeTokenProgramId(value) {
+  const text = String(value || '').trim();
+  if (text === TOKEN_2022_PROGRAM_ID.toBase58()) {
+    return TOKEN_2022_PROGRAM_ID;
+  }
+  return TOKEN_PROGRAM_ID;
+}
+
+function createConnectionFromConfig(config) {
+  const endpoint = String(config?.RPC_URL || '').trim();
+  if (!endpoint) {
+    throw new Error('RPC URL is not configured.');
+  }
+  return new Connection(endpoint, 'confirmed');
+}
+
+async function getHardwareTransferConfig() {
+  const config = await getEffectiveBotInputConfig();
+  const ownerWallet = String(config.OWNER_WALLET || '').trim();
+  const hotWalletSecret = String(config.HOT_WALLET_SECRET || '').trim();
+  if (!ownerWallet) {
+    throw new Error('Managed Wallet is not configured.');
+  }
+  if (!hotWalletSecret) {
+    throw new Error('Hot Wallet Secret is not configured. The hot wallet pays the transfer fee.');
+  }
+  return {
+    config,
+    connection: createConnectionFromConfig(config),
+    owner: new PublicKey(ownerWallet),
+    feePayer: Keypair.fromSecretKey(decodeWalletSecret(hotWalletSecret)),
+  };
+}
+
+async function getHardwareWalletTokenBalances() {
+  const { connection, owner } = await getHardwareTransferConfig();
+  const accountsByKey = new Map();
+
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    const response = await connection.getParsedTokenAccountsByOwner(owner, { programId }, 'confirmed');
+    for (const item of response.value) {
+      const info = item.account.data?.parsed?.info;
+      const tokenAmount = info?.tokenAmount;
+      const rawAmount = String(tokenAmount?.amount ?? '0');
+      if (!info?.mint || rawAmount === '0') {
+        continue;
+      }
+
+      const key = `${info.mint}:${programId.toBase58()}`;
+      accountsByKey.set(key, {
+        key,
+        mint: info.mint,
+        tokenAccount: item.pubkey.toBase58(),
+        tokenProgramId: programId.toBase58(),
+        name: getAssetNameByMint(info.mint) || shortMint(info.mint),
+        decimals: Number(tokenAmount?.decimals ?? 0),
+        amount: rawAmount,
+        uiAmount: tokenAmount?.uiAmountString || formatBaseUnits(rawAmount, tokenAmount?.decimals ?? 0),
+      });
+    }
+  }
+
+  return Array.from(accountsByKey.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function shortMint(value) {
+  const text = String(value || '').trim();
+  return text.length > 14 ? `${text.slice(0, 6)}...${text.slice(-6)}` : text;
+}
+
+async function signWithLedger(serializedMessage, owner, ledgerPath) {
+  const transport = await TransportNodeHid.create();
+  try {
+    const solana = new LedgerSolana(transport);
+    const addressResult = await solana.getAddress(ledgerPath, false);
+    const ledgerAddress = new PublicKey(addressResult.address);
+    if (!ledgerAddress.equals(owner)) {
+      throw new Error(
+        `Ledger path ${ledgerPath} resolves to ${ledgerAddress.toBase58()}, but Managed Wallet is ${owner.toBase58()}.`,
+      );
+    }
+    const signatureResult = await solana.signTransaction(ledgerPath, Buffer.from(serializedMessage));
+    return signatureResult.signature;
+  } finally {
+    await transport.close().catch(() => undefined);
+  }
+}
+
+async function sendHardwareWalletToken(payload) {
+  const { connection, owner, feePayer } = await getHardwareTransferConfig();
+  const recipient = new PublicKey(String(payload?.recipient || '').trim());
+  const mint = new PublicKey(String(payload?.mint || '').trim());
+  const tokenProgramId = normalizeTokenProgramId(payload?.tokenProgramId);
+  const ledgerPath = String(payload?.ledgerPath || getDefaultLedgerPath()).trim() || getDefaultLedgerPath();
+  const decimals = Math.max(0, Number(payload?.decimals ?? 0) || 0);
+  const sendMax = Boolean(payload?.sendMax);
+  const availableAmount = BigInt(String(payload?.availableAmount || '0'));
+  const amount = sendMax
+    ? availableAmount
+    : parseTokenAmountToBaseUnits(payload?.amount, decimals);
+
+  if (amount <= 0n) {
+    throw new Error('Selected token balance is empty.');
+  }
+  if (availableAmount > 0n && amount > availableAmount) {
+    throw new Error('Amount is higher than the available token balance.');
+  }
+
+  const sourceAta = await getAssociatedTokenAddress(mint, owner, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID);
+  const recipientAta = await getAssociatedTokenAddress(mint, recipient, false, tokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID);
+  const transaction = new Transaction();
+  transaction.add(
+    createAssociatedTokenAccountIdempotentInstruction(
+      feePayer.publicKey,
+      recipientAta,
+      recipient,
+      mint,
+      tokenProgramId,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+    ),
+  );
+
+  const transferInstruction = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID)
+    ? await createTransferCheckedWithTransferHookInstruction(
+        connection,
+        sourceAta,
+        mint,
+        recipientAta,
+        owner,
+        amount,
+        decimals,
+        [],
+        'confirmed',
+        tokenProgramId,
+      )
+    : createTransferCheckedInstruction(sourceAta, mint, recipientAta, owner, amount, decimals, [], tokenProgramId);
+  transaction.add(transferInstruction);
+
+  const blockhash = await connection.getLatestBlockhash('confirmed');
+  transaction.feePayer = feePayer.publicKey;
+  transaction.recentBlockhash = blockhash.blockhash;
+  transaction.partialSign(feePayer);
+
+  const ledgerSignature = await signWithLedger(transaction.serializeMessage(), owner, ledgerPath);
+  transaction.addSignature(owner, ledgerSignature);
+
+  const signature = await connection.sendRawTransaction(transaction.serialize(), {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed',
+  });
+  await connection.confirmTransaction(
+    {
+      signature,
+      blockhash: blockhash.blockhash,
+      lastValidBlockHeight: blockhash.lastValidBlockHeight,
+    },
+    'confirmed',
+  );
+
+  return {
+    ok: true,
+    signature,
+    amount: formatBaseUnits(amount, decimals),
+    mint: mint.toBase58(),
+    recipient: recipient.toBase58(),
+  };
 }
 
 function normalizeAssetRules(rows) {
@@ -1091,6 +1385,77 @@ ipcMain.handle('crew-deposit:run', async (_event, payload) => {
       status: 'error',
       count,
       batchSize,
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('hardware-transfer:state', async () => {
+  try {
+    const config = await getEffectiveEditableConfig();
+    return {
+      ok: true,
+      ownerWallet: String(config.OWNER_WALLET || '').trim(),
+      ledgerPath: getDefaultLedgerPath(),
+      recipients: await loadRecipients(),
+      balances: await getHardwareWalletTokenBalances(),
+    };
+  } catch (err) {
+    logger.error('Hardware wallet transfer state failed:', err);
+    return {
+      ok: false,
+      ownerWallet: '',
+      ledgerPath: getDefaultLedgerPath(),
+      recipients: await loadRecipients(),
+      balances: [],
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('hardware-transfer:balances', async () => {
+  try {
+    return {
+      ok: true,
+      balances: await getHardwareWalletTokenBalances(),
+    };
+  } catch (err) {
+    logger.error('Hardware wallet balance check failed:', err);
+    return {
+      ok: false,
+      balances: [],
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('hardware-transfer:save-recipient', async (_event, payload) => {
+  try {
+    return {
+      ok: true,
+      recipients: await saveRecipient(payload),
+    };
+  } catch (err) {
+    logger.error('Saving hardware wallet recipient failed:', err);
+    return {
+      ok: false,
+      recipients: await loadRecipients(),
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('hardware-transfer:send', async (_event, payload) => {
+  try {
+    const result = await sendHardwareWalletToken(payload || {});
+    logger.info(
+      `Hardware wallet token transfer sent ${result.amount} of ${result.mint} to ${result.recipient}: ${result.signature}`,
+    );
+    return result;
+  } catch (err) {
+    logger.error('Hardware wallet token transfer failed:', err);
+    return {
+      ok: false,
       message: err?.message || String(err),
     };
   }

@@ -42,6 +42,7 @@ const saveBtn = document.getElementById('save-btn');
 const startBtn = document.getElementById('start-btn');
 const stopBtn = document.getElementById('stop-btn');
 const depositCrewBtn = document.getElementById('deposit-crew-btn');
+const hardwareTransferBtn = document.getElementById('hardware-transfer-btn');
 const updateBtn = document.getElementById('update-btn');
 const updateModal = document.getElementById('update-modal');
 const updateCurrentVersionEl = document.getElementById('update-current-version');
@@ -56,6 +57,22 @@ const depositCrewCountInput = document.getElementById('deposit-crew-count');
 const depositCrewMessageEl = document.getElementById('deposit-crew-message');
 const depositCrewConfirmBtn = document.getElementById('deposit-crew-confirm-btn');
 const depositCrewCancelBtn = document.getElementById('deposit-crew-cancel-btn');
+const hardwareTransferModal = document.getElementById('hardware-transfer-modal');
+const hardwareTransferOwnerEl = document.getElementById('hardware-transfer-owner');
+const hardwareTransferLedgerPathEl = document.getElementById('hardware-transfer-ledger-path');
+const hardwareTransferRecipientInput = document.getElementById('hardware-transfer-recipient');
+const hardwareTransferRecipientList = document.getElementById('hardware-transfer-recipient-list');
+const hardwareTransferTokenSelect = document.getElementById('hardware-transfer-token');
+const hardwareTransferBalanceEl = document.getElementById('hardware-transfer-balance');
+const hardwareTransferRefreshBtn = document.getElementById('hardware-transfer-refresh-btn');
+const hardwareTransferAmountInput = document.getElementById('hardware-transfer-amount');
+const hardwareTransferMaxBtn = document.getElementById('hardware-transfer-max-btn');
+const hardwareTransferStoreRecipientInput = document.getElementById('hardware-transfer-store-recipient');
+const hardwareTransferNameRow = document.getElementById('hardware-transfer-name-row');
+const hardwareTransferRecipientNameInput = document.getElementById('hardware-transfer-recipient-name');
+const hardwareTransferMessageEl = document.getElementById('hardware-transfer-message');
+const hardwareTransferConfirmBtn = document.getElementById('hardware-transfer-confirm-btn');
+const hardwareTransferCancelBtn = document.getElementById('hardware-transfer-cancel-btn');
 const addRuleRowBtn = document.getElementById('add-rule-row-btn');
 const appVersionEl = document.getElementById('app-version');
 const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
@@ -105,6 +122,12 @@ let availableUpdate = null;
 let updateCheckInFlight = false;
 let updateCheckPromise = null;
 let crewDepositStatus = null;
+let hardwareTransferState = {
+  ownerWallet: '',
+  ledgerPath: "44'/501'/0'",
+  recipients: [],
+  balances: [],
+};
 
 if (appVersionEl) {
   appVersionEl.textContent = `v${APP_VERSION}`;
@@ -147,6 +170,145 @@ function setUpdateModalOpen(open) {
 
 function setDepositCrewModalOpen(open) {
   depositCrewModal.hidden = !open;
+}
+
+function setHardwareTransferModalOpen(open) {
+  hardwareTransferModal.hidden = !open;
+}
+
+function getSelectedHardwareTransferBalance() {
+  const key = hardwareTransferTokenSelect.value;
+  return hardwareTransferState.balances.find((entry) => entry.key === key) || null;
+}
+
+function getKnownRecipient(address) {
+  const value = String(address || '').trim();
+  return hardwareTransferState.recipients.find((entry) => entry.address === value) || null;
+}
+
+function isLikelySolanaAddress(value) {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(value || '').trim());
+}
+
+function renderHardwareTransferRecipients() {
+  hardwareTransferRecipientList.innerHTML = '';
+  for (const recipient of hardwareTransferState.recipients) {
+    const option = document.createElement('option');
+    option.value = recipient.address;
+    option.label = recipient.name;
+    hardwareTransferRecipientList.appendChild(option);
+  }
+}
+
+function renderHardwareTransferBalances() {
+  hardwareTransferTokenSelect.innerHTML = '';
+  const balances = hardwareTransferState.balances || [];
+  if (!balances.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No token balances found';
+    hardwareTransferTokenSelect.appendChild(option);
+    hardwareTransferBalanceEl.textContent = '—';
+    hardwareTransferConfirmBtn.disabled = true;
+    return;
+  }
+
+  for (const entry of balances) {
+    const option = document.createElement('option');
+    option.value = entry.key;
+    option.textContent = `${entry.name} (${entry.uiAmount})`;
+    option.dataset.mint = entry.mint;
+    hardwareTransferTokenSelect.appendChild(option);
+  }
+  renderHardwareTransferSelection();
+}
+
+function renderHardwareTransferSelection() {
+  const selected = getSelectedHardwareTransferBalance();
+  hardwareTransferBalanceEl.textContent = selected ? `${selected.uiAmount} ${selected.name}` : '—';
+  hardwareTransferAmountInput.placeholder = selected ? selected.uiAmount : '';
+  renderHardwareTransferRecipientState();
+}
+
+function renderHardwareTransferRecipientState() {
+  const recipient = String(hardwareTransferRecipientInput.value || '').trim();
+  const knownRecipient = getKnownRecipient(recipient);
+  const shouldStore = Boolean(hardwareTransferStoreRecipientInput.checked && recipient && !knownRecipient);
+  hardwareTransferNameRow.hidden = !shouldStore;
+  hardwareTransferConfirmBtn.disabled =
+    !getSelectedHardwareTransferBalance() ||
+    !isLikelySolanaAddress(recipient) ||
+    !String(hardwareTransferAmountInput.value || '').trim() ||
+    (shouldStore && !String(hardwareTransferRecipientNameInput.value || '').trim());
+}
+
+function setHardwareTransferBusy(busy) {
+  hardwareTransferConfirmBtn.disabled = busy;
+  hardwareTransferCancelBtn.disabled = busy;
+  hardwareTransferRefreshBtn.disabled = busy;
+  hardwareTransferMaxBtn.disabled = busy;
+  hardwareTransferTokenSelect.disabled = busy;
+  hardwareTransferRecipientInput.disabled = busy;
+  hardwareTransferAmountInput.disabled = busy;
+  hardwareTransferStoreRecipientInput.disabled = busy;
+  hardwareTransferRecipientNameInput.disabled = busy;
+}
+
+function applyHardwareTransferState(state) {
+  hardwareTransferState = {
+    ownerWallet: state?.ownerWallet || '',
+    ledgerPath: state?.ledgerPath || "44'/501'/0'",
+    recipients: Array.isArray(state?.recipients) ? state.recipients : [],
+    balances: Array.isArray(state?.balances) ? state.balances : [],
+  };
+  hardwareTransferOwnerEl.textContent = shortKey(hardwareTransferState.ownerWallet || '—');
+  hardwareTransferOwnerEl.title = hardwareTransferState.ownerWallet || '';
+  hardwareTransferLedgerPathEl.value = localStorage.getItem('lmMarketBotLedgerPath') || hardwareTransferState.ledgerPath;
+  renderHardwareTransferRecipients();
+  renderHardwareTransferBalances();
+}
+
+async function refreshHardwareTransferBalances() {
+  hardwareTransferBalanceEl.textContent = 'Checking...';
+  hardwareTransferRefreshBtn.disabled = true;
+  try {
+    const result = await window.botApi.refreshHardwareWalletBalances();
+    if (!result?.ok) {
+      hardwareTransferMessageEl.textContent = result?.message || 'Balance check failed.';
+      return;
+    }
+    hardwareTransferState.balances = result.balances || [];
+    renderHardwareTransferBalances();
+    hardwareTransferMessageEl.textContent = 'Balances refreshed.';
+  } catch (err) {
+    hardwareTransferMessageEl.textContent = `Balance check failed: ${err?.message || String(err)}`;
+  } finally {
+    hardwareTransferRefreshBtn.disabled = false;
+  }
+}
+
+async function openHardwareTransferDialog() {
+  hardwareTransferRecipientInput.value = '';
+  hardwareTransferAmountInput.value = '';
+  hardwareTransferRecipientNameInput.value = '';
+  hardwareTransferStoreRecipientInput.checked = true;
+  hardwareTransferMessageEl.textContent = 'Checking handler wallet balances...';
+  setHardwareTransferModalOpen(true);
+  setHardwareTransferBusy(true);
+
+  try {
+    const state = await window.botApi.getHardwareWalletTransferState();
+    applyHardwareTransferState(state);
+    hardwareTransferMessageEl.textContent = state?.ok
+      ? 'Connect and unlock the Ledger with the Solana app open before sending.'
+      : state?.message || 'Transfer setup is not ready.';
+  } catch (err) {
+    applyHardwareTransferState(null);
+    hardwareTransferMessageEl.textContent = `Transfer setup failed: ${err?.message || String(err)}`;
+  } finally {
+    setHardwareTransferBusy(false);
+    renderHardwareTransferRecipientState();
+  }
 }
 
 function renderUpdateButtonState(result, error = null) {
@@ -1580,6 +1742,10 @@ depositCrewBtn.addEventListener('click', () => {
   void openDepositCrewDialog();
 });
 
+hardwareTransferBtn.addEventListener('click', () => {
+  void openHardwareTransferDialog();
+});
+
 updateBtn.addEventListener('click', () => {
   void openUpdateDialog();
 });
@@ -1603,6 +1769,44 @@ depositCrewModal.addEventListener('click', (event) => {
     setDepositCrewModalOpen(false);
   }
 });
+
+hardwareTransferCancelBtn.addEventListener('click', () => {
+  setHardwareTransferModalOpen(false);
+});
+
+hardwareTransferModal.addEventListener('click', (event) => {
+  if (event.target === hardwareTransferModal) {
+    setHardwareTransferModalOpen(false);
+  }
+});
+
+hardwareTransferTokenSelect.addEventListener('change', () => {
+  hardwareTransferAmountInput.value = '';
+  renderHardwareTransferSelection();
+});
+
+hardwareTransferRefreshBtn.addEventListener('click', () => {
+  void refreshHardwareTransferBalances();
+});
+
+hardwareTransferMaxBtn.addEventListener('click', () => {
+  const selected = getSelectedHardwareTransferBalance();
+  if (!selected) return;
+  hardwareTransferAmountInput.value = selected.uiAmount;
+  renderHardwareTransferRecipientState();
+});
+
+hardwareTransferRecipientInput.addEventListener('input', () => {
+  const knownRecipient = getKnownRecipient(hardwareTransferRecipientInput.value);
+  if (knownRecipient) {
+    hardwareTransferRecipientNameInput.value = knownRecipient.name;
+  }
+  renderHardwareTransferRecipientState();
+});
+
+hardwareTransferAmountInput.addEventListener('input', renderHardwareTransferRecipientState);
+hardwareTransferStoreRecipientInput.addEventListener('change', renderHardwareTransferRecipientState);
+hardwareTransferRecipientNameInput.addEventListener('input', renderHardwareTransferRecipientState);
 
 depositCrewCountInput.addEventListener('input', () => {
   renderDepositCrewStatus(crewDepositStatus);
@@ -1638,6 +1842,62 @@ depositCrewConfirmBtn.addEventListener('click', async () => {
     depositCrewConfirmBtn.disabled =
       !Boolean(crewDepositStatus?.ready) ||
       (refreshedAvailableCrew !== null && refreshedAvailableCrew <= 0);
+  }
+});
+
+hardwareTransferConfirmBtn.addEventListener('click', async () => {
+  const selected = getSelectedHardwareTransferBalance();
+  if (!selected) return;
+
+  const recipient = String(hardwareTransferRecipientInput.value || '').trim();
+  const knownRecipient = getKnownRecipient(recipient);
+  const shouldStoreRecipient = Boolean(hardwareTransferStoreRecipientInput.checked && recipient && !knownRecipient);
+
+  setHardwareTransferBusy(true);
+  hardwareTransferMessageEl.textContent = 'Approve the transfer on the Ledger...';
+  appendLog(`[${new Date().toISOString()}] [INFO] Hardware wallet token transfer requested for ${selected.name}.`);
+
+  try {
+    const result = await window.botApi.sendHardwareWalletToken({
+      recipient,
+      mint: selected.mint,
+      tokenProgramId: selected.tokenProgramId,
+      decimals: selected.decimals,
+      amount: hardwareTransferAmountInput.value,
+      availableAmount: selected.amount,
+      sendMax: hardwareTransferAmountInput.value === selected.uiAmount,
+      ledgerPath: hardwareTransferLedgerPathEl.value,
+    });
+
+    if (!result?.ok) {
+      hardwareTransferMessageEl.textContent = result?.message || 'Transfer failed.';
+      appendLog(`[${new Date().toISOString()}] [WARN] Hardware wallet token transfer failed: ${result?.message || 'unknown error'}`);
+      return;
+    }
+
+    localStorage.setItem('lmMarketBotLedgerPath', hardwareTransferLedgerPathEl.value);
+
+    if (shouldStoreRecipient) {
+      const saved = await window.botApi.saveHardwareWalletRecipient({
+        address: recipient,
+        name: hardwareTransferRecipientNameInput.value,
+      });
+      if (saved?.ok) {
+        hardwareTransferState.recipients = saved.recipients || [];
+        renderHardwareTransferRecipients();
+      }
+    }
+
+    hardwareTransferMessageEl.textContent = `Transfer sent: ${result.signature}`;
+    appendLog(`[${new Date().toISOString()}] [INFO] Hardware wallet token transfer sent: ${result.signature}`);
+    await refreshHardwareTransferBalances();
+    await refreshBotStatus();
+  } catch (err) {
+    hardwareTransferMessageEl.textContent = `Transfer failed: ${err?.message || String(err)}`;
+    appendLog(`[${new Date().toISOString()}] [ERROR] Hardware wallet token transfer failed: ${err?.message || String(err)}`);
+  } finally {
+    setHardwareTransferBusy(false);
+    renderHardwareTransferRecipientState();
   }
 });
 

@@ -183,6 +183,7 @@
               <button id="start-btn" type="button">Start Bot</button>
               <button id="stop-btn" type="button">Stop Bot</button>
               <span class="actions-spacer"></span>
+              <button id="hardware-transfer-btn" type="button">Send Tokens</button>
               <button id="deposit-crew-btn" type="button" hidden>Deposit Crew</button>
             </div>
           </section>
@@ -315,6 +316,63 @@
         <div class="update-dialog-actions">
           <button id="deposit-crew-confirm-btn" type="button" disabled>Deposit Crew</button>
           <button id="deposit-crew-cancel-btn" type="button">Cancel</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="hardware-transfer-modal" hidden>
+      <section class="update-dialog hardware-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="hardware-transfer-dialog-title">
+        <h2 id="hardware-transfer-dialog-title">Send Tokens</h2>
+        <div class="hardware-transfer-summary">
+          <div>
+            <span>Handler wallet</span>
+            <strong id="hardware-transfer-owner">—</strong>
+          </div>
+          <div>
+            <span>Ledger path</span>
+            <input id="hardware-transfer-ledger-path" type="text" autocomplete="off" value="44'/501'/0'" />
+          </div>
+        </div>
+
+        <label class="hardware-transfer-field">
+          Recipient
+          <input id="hardware-transfer-recipient" list="hardware-transfer-recipient-list" type="text" autocomplete="off" placeholder="Recipient wallet address" />
+          <datalist id="hardware-transfer-recipient-list"></datalist>
+        </label>
+
+        <label class="hardware-transfer-field">
+          Token
+          <select id="hardware-transfer-token"></select>
+        </label>
+
+        <div class="hardware-transfer-balance-row">
+          <span>Available</span>
+          <strong id="hardware-transfer-balance">—</strong>
+          <button id="hardware-transfer-refresh-btn" type="button">Refresh</button>
+        </div>
+
+        <div class="hardware-transfer-amount-row">
+          <label class="hardware-transfer-field">
+            Amount
+            <input id="hardware-transfer-amount" type="text" inputmode="decimal" autocomplete="off" />
+          </label>
+          <button id="hardware-transfer-max-btn" type="button">MAX</button>
+        </div>
+
+        <label class="checkbox-label hardware-transfer-store-row">
+          <input id="hardware-transfer-store-recipient" type="checkbox" checked />
+          Store recipient locally
+        </label>
+
+        <label class="hardware-transfer-field" id="hardware-transfer-name-row" hidden>
+          Recipient name
+          <input id="hardware-transfer-recipient-name" type="text" autocomplete="off" placeholder="Name for local address book" />
+        </label>
+
+        <p class="update-message" id="hardware-transfer-message">Connect and unlock the Ledger with the Solana app open before sending.</p>
+        <div class="update-dialog-actions">
+          <button id="hardware-transfer-confirm-btn" type="button" disabled>Send</button>
+          <button id="hardware-transfer-cancel-btn" type="button">Cancel</button>
         </div>
       </section>
     </div>
