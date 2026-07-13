@@ -597,6 +597,14 @@ function getAssetNameByMint(mint) {
   return entry?.name || '';
 }
 
+function getBatchTransferMaterialMintSet() {
+  const endIndex = GM_MARKET_ASSET_REGISTRY.findIndex((asset) => asset.name === 'Toolkits');
+  const entries = endIndex >= 0
+    ? GM_MARKET_ASSET_REGISTRY.slice(0, endIndex + 1)
+    : GM_MARKET_ASSET_REGISTRY;
+  return new Set(entries.map((asset) => asset.mint));
+}
+
 function normalizeRecipientEntries(entries) {
   if (!Array.isArray(entries)) {
     return [];
@@ -755,6 +763,19 @@ async function getHardwareTransferConfig() {
   };
 }
 
+async function getHotWalletTransferConfig() {
+  const config = await getEffectiveBotInputConfig();
+  const hotWalletSecret = String(config.HOT_WALLET_SECRET || '').trim();
+  if (!hotWalletSecret) {
+    throw new Error('Hot Wallet Secret is not configured.');
+  }
+  return {
+    config,
+    connection: createConnectionFromConfig(config),
+    hotWallet: Keypair.fromSecretKey(decodeWalletSecret(hotWalletSecret)),
+  };
+}
+
 async function getHardwareWalletTokenBalances() {
   const { connection, owner } = await getHardwareTransferConfig();
   const accountsByKey = new Map();
@@ -766,6 +787,38 @@ async function getHardwareWalletTokenBalances() {
       const tokenAmount = info?.tokenAmount;
       const rawAmount = String(tokenAmount?.amount ?? '0');
       if (!info?.mint || rawAmount === '0') {
+        continue;
+      }
+
+      const key = `${info.mint}:${programId.toBase58()}`;
+      accountsByKey.set(key, {
+        key,
+        mint: info.mint,
+        tokenAccount: item.pubkey.toBase58(),
+        tokenProgramId: programId.toBase58(),
+        name: getAssetNameByMint(info.mint) || shortMint(info.mint),
+        decimals: Number(tokenAmount?.decimals ?? 0),
+        amount: rawAmount,
+        uiAmount: tokenAmount?.uiAmountString || formatBaseUnits(rawAmount, tokenAmount?.decimals ?? 0),
+      });
+    }
+  }
+
+  return Array.from(accountsByKey.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function getHotWalletMaterialTokenBalances() {
+  const { connection, hotWallet } = await getHotWalletTransferConfig();
+  const allowedMints = getBatchTransferMaterialMintSet();
+  const accountsByKey = new Map();
+
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    const response = await connection.getParsedTokenAccountsByOwner(hotWallet.publicKey, { programId }, 'confirmed');
+    for (const item of response.value) {
+      const info = item.account.data?.parsed?.info;
+      const tokenAmount = info?.tokenAmount;
+      const rawAmount = String(tokenAmount?.amount ?? '0');
+      if (!info?.mint || rawAmount === '0' || !allowedMints.has(info.mint)) {
         continue;
       }
 
@@ -1032,6 +1085,134 @@ async function sendHardwareWalletToken(payload, onProgress = () => undefined) {
     amount: formatBaseUnits(transfer.amount, transfer.decimals),
     mint: transfer.mint.toBase58(),
     recipient: transfer.recipient.toBase58(),
+  };
+}
+
+async function sendHotWalletBatchTokenTransfer(payload, onProgress = () => undefined) {
+  onProgress('Preparing batch token transfer...');
+  const { connection, hotWallet } = await getHotWalletTransferConfig();
+  const recipient = new PublicKey(String(payload?.recipient || '').trim());
+  const requestedTransfers = Array.isArray(payload?.transfers)
+    ? payload.transfers
+        .map((entry) => ({
+          key: String(entry?.key || '').trim(),
+          amountText: String(entry?.amount || '').trim(),
+        }))
+        .filter((entry) => entry.key && entry.amountText)
+    : [];
+
+  if (!requestedTransfers.length) {
+    throw new Error('Enter an amount for at least one token.');
+  }
+
+  onProgress('Checking hot wallet balances...');
+  const balances = await getHotWalletMaterialTokenBalances();
+  const balancesByKey = new Map(balances.map((entry) => [entry.key, entry]));
+  const transaction = new Transaction();
+  const summaries = [];
+
+  for (const request of requestedTransfers) {
+    const balance = balancesByKey.get(request.key);
+    if (!balance) {
+      throw new Error('One selected token is no longer available in the hot wallet.');
+    }
+
+    const amount = parseTokenAmountToBaseUnits(request.amountText, balance.decimals);
+    const availableAmount = BigInt(String(balance.amount || '0'));
+    if (amount > availableAmount) {
+      throw new Error(`${balance.name} amount is higher than the available balance.`);
+    }
+
+    const mint = new PublicKey(balance.mint);
+    const sourceTokenAccount = new PublicKey(balance.tokenAccount);
+    const tokenProgramId = normalizeTokenProgramId(balance.tokenProgramId);
+    const recipientAta = await getAssociatedTokenAddress(
+      mint,
+      recipient,
+      false,
+      tokenProgramId,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+    );
+
+    transaction.add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        hotWallet.publicKey,
+        recipientAta,
+        recipient,
+        mint,
+        tokenProgramId,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      ),
+    );
+
+    const transferInstruction = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID)
+      ? await createTransferCheckedWithTransferHookInstruction(
+          connection,
+          sourceTokenAccount,
+          mint,
+          recipientAta,
+          hotWallet.publicKey,
+          amount,
+          balance.decimals,
+          [],
+          'confirmed',
+          tokenProgramId,
+        )
+      : createTransferCheckedInstruction(
+          sourceTokenAccount,
+          mint,
+          recipientAta,
+          hotWallet.publicKey,
+          amount,
+          balance.decimals,
+          [],
+          tokenProgramId,
+        );
+    transaction.add(transferInstruction);
+
+    summaries.push({
+      token: balance.name,
+      mint: balance.mint,
+      amount: formatBaseUnits(amount, balance.decimals),
+    });
+  }
+
+  const blockhash = await connection.getLatestBlockhash('confirmed');
+  transaction.feePayer = hotWallet.publicKey;
+  transaction.recentBlockhash = blockhash.blockhash;
+  transaction.sign(hotWallet);
+
+  let serializedTransaction;
+  try {
+    serializedTransaction = transaction.serialize();
+  } catch (err) {
+    throw new Error(
+      `Batch transfer is too large for one Solana transaction. Reduce the number of token rows and try again. ${err?.message || String(err)}`,
+    );
+  }
+
+  onProgress(`Sending ${summaries.length} token transfer${summaries.length === 1 ? '' : 's'}...`);
+  const signature = await connection.sendRawTransaction(serializedTransaction, {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed',
+  });
+
+  onProgress('Confirming the batch transfer...');
+  await connection.confirmTransaction(
+    {
+      signature,
+      blockhash: blockhash.blockhash,
+      lastValidBlockHeight: blockhash.lastValidBlockHeight,
+    },
+    'confirmed',
+  );
+
+  return {
+    ok: true,
+    signature,
+    recipient: recipient.toBase58(),
+    sender: hotWallet.publicKey.toBase58(),
+    transfers: summaries,
   };
 }
 
@@ -1718,6 +1899,78 @@ ipcMain.handle('hardware-transfer:broadcast-payload', async (_event, payload) =>
     return result;
   } catch (err) {
     logger.error('Hardware wallet signed transfer broadcast failed:', err);
+    return {
+      ok: false,
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('batch-token-transfer:state', async () => {
+  try {
+    const { hotWallet } = await getHotWalletTransferConfig();
+    return {
+      ok: true,
+      hotWallet: hotWallet.publicKey.toBase58(),
+      recipients: await loadRecipients(),
+      balances: await getHotWalletMaterialTokenBalances(),
+    };
+  } catch (err) {
+    logger.error('Batch token transfer state failed:', err);
+    return {
+      ok: false,
+      hotWallet: '',
+      recipients: await loadRecipients(),
+      balances: [],
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('batch-token-transfer:balances', async () => {
+  try {
+    return {
+      ok: true,
+      balances: await getHotWalletMaterialTokenBalances(),
+    };
+  } catch (err) {
+    logger.error('Batch token balance check failed:', err);
+    return {
+      ok: false,
+      balances: [],
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('batch-token-transfer:save-recipient', async (_event, payload) => {
+  try {
+    return {
+      ok: true,
+      recipients: await saveRecipient(payload),
+    };
+  } catch (err) {
+    logger.error('Saving batch token recipient failed:', err);
+    return {
+      ok: false,
+      recipients: await loadRecipients(),
+      message: err?.message || String(err),
+    };
+  }
+});
+
+ipcMain.handle('batch-token-transfer:send', async (_event, payload) => {
+  const sendProgress = (message) => {
+    _event.sender.send('batch-token-transfer:progress', { message });
+  };
+  try {
+    const result = await sendHotWalletBatchTokenTransfer(payload || {}, sendProgress);
+    logger.info(
+      `Hot wallet batch token transfer sent ${result.transfers.length} token row(s) to ${result.recipient}: ${result.signature}`,
+    );
+    return result;
+  } catch (err) {
+    logger.error('Hot wallet batch token transfer failed:', err);
     return {
       ok: false,
       message: err?.message || String(err),

@@ -325,13 +325,10 @@
         <h2 id="hardware-transfer-dialog-title">Send Tokens</h2>
         <div class="hardware-transfer-summary">
           <div>
-            <span>Handler wallet</span>
+            <span>Hot wallet</span>
             <strong id="hardware-transfer-owner">—</strong>
           </div>
-          <div>
-            <span>Ledger path</span>
-            <input id="hardware-transfer-ledger-path" type="text" autocomplete="off" value="44'/501'/0'" />
-          </div>
+          <button id="hardware-transfer-refresh-btn" type="button">Refresh</button>
         </div>
 
         <label class="hardware-transfer-field">
@@ -345,25 +342,6 @@
           <datalist id="hardware-transfer-recipient-list"></datalist>
         </label>
 
-        <label class="hardware-transfer-field">
-          Token
-          <select id="hardware-transfer-token"></select>
-        </label>
-
-        <div class="hardware-transfer-balance-row">
-          <span>Available</span>
-          <strong id="hardware-transfer-balance">—</strong>
-          <button id="hardware-transfer-refresh-btn" type="button">Refresh</button>
-        </div>
-
-        <div class="hardware-transfer-amount-row">
-          <label class="hardware-transfer-field">
-            Amount
-            <input id="hardware-transfer-amount" type="text" inputmode="decimal" autocomplete="off" />
-          </label>
-          <button id="hardware-transfer-max-btn" type="button">MAX</button>
-        </div>
-
         <label class="checkbox-label hardware-transfer-store-row">
           <input id="hardware-transfer-store-recipient" type="checkbox" checked />
           Store recipient locally
@@ -374,30 +352,27 @@
           <input id="hardware-transfer-recipient-name" type="text" autocomplete="off" placeholder="Name for local address book" />
         </label>
 
-        <details class="hardware-transfer-handoff">
-          <summary>Sign on another PC</summary>
-          <div class="hardware-transfer-handoff-grid">
-            <section>
-              <h3>Bot PC</h3>
-              <button id="hardware-transfer-export-btn" type="button" disabled>Create unsigned payload</button>
-              <textarea id="hardware-transfer-unsigned-payload" rows="4" readonly spellcheck="false" placeholder="Unsigned payload appears here. Paste it into the Ledger PC signer."></textarea>
-              <button id="hardware-transfer-copy-unsigned-btn" type="button" disabled>Copy unsigned</button>
-              <textarea id="hardware-transfer-signed-payload" rows="4" spellcheck="false" placeholder="Paste signed payload here, then broadcast from this bot PC."></textarea>
-              <button id="hardware-transfer-broadcast-btn" type="button">Broadcast signed transfer</button>
-            </section>
-            <section>
-              <h3>Ledger PC</h3>
-              <textarea id="hardware-transfer-signer-input" rows="4" spellcheck="false" placeholder="Paste unsigned payload here on the PC with the Ledger."></textarea>
-              <button id="hardware-transfer-sign-payload-btn" type="button">Sign with local Ledger</button>
-              <textarea id="hardware-transfer-signer-output" rows="4" readonly spellcheck="false" placeholder="Signed payload appears here. Paste it back into the bot PC."></textarea>
-              <button id="hardware-transfer-copy-signed-btn" type="button" disabled>Copy signed</button>
-            </section>
-          </div>
-        </details>
+        <div class="hardware-transfer-table-wrap">
+          <table class="hardware-transfer-table">
+            <thead>
+              <tr>
+                <th>Material / Component</th>
+                <th>Available</th>
+                <th>Amount to send</th>
+              </tr>
+            </thead>
+            <tbody id="hardware-transfer-token-rows">
+              <tr>
+                <td colspan="3">Checking balances...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
-        <p class="update-message" id="hardware-transfer-message">Connect and unlock the Ledger with the Solana app open before sending.</p>
+        <p class="update-message" id="hardware-transfer-message">Choose a recipient and enter one or more token amounts.</p>
         <div class="update-dialog-actions">
-          <button id="hardware-transfer-confirm-btn" type="button" disabled>Send</button>
+          <button id="hardware-transfer-clear-btn" type="button">Clear all</button>
+          <button id="hardware-transfer-confirm-btn" type="button" disabled>Send batch</button>
           <button id="hardware-transfer-cancel-btn" type="button">Cancel</button>
         </div>
       </section>
