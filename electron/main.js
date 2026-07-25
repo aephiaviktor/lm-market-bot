@@ -137,6 +137,13 @@ const {
 } = require('rpc_limiter/dist/state');
 const { LmMarketBot, buildBotConfig, getEditableConfigFromEnv, EDITABLE_CONFIG_KEYS } = require('../dist/bot');
 const {
+  isTrustedIpcEvent,
+  validateAssetAndSide,
+  validateAssetList,
+  validateRedeemPayload,
+  validateSettingsPayload,
+} = require('./ipc-security-policy');
+const {
   GM_MARKET_ASSET_REGISTRY,
   formatAssetRegistryResourceList,
   loadAssetRegistryForAephiaKey,
@@ -1583,6 +1590,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       additionalArguments: [`--lm-market-bot-version=${APP_VERSION}`],
       backgroundThrottling: false,
     },
@@ -1592,6 +1600,8 @@ function createWindow() {
     mainWindow.setIcon(iconPath);
   }
   attachWindowCrashLogging(mainWindow);
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event) => event.preventDefault());
 
   // Keep the instance suffix even when renderer.html's <title> fires a
   // page-title-updated event after load.
@@ -1608,9 +1618,18 @@ function createWindow() {
 
 installCrashEventLogging();
 
-ipcMain.handle('logs:get', async () => recentLogs);
+function handleTrusted(channel, handler) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    if (!isTrustedIpcEvent(event, mainWindow?.webContents)) {
+      throw new Error(`Rejected untrusted IPC request: ${channel}`);
+    }
+    return await handler(event, ...args);
+  });
+}
 
-ipcMain.handle('settings:get', async () => {
+handleTrusted('logs:get', async () => recentLogs);
+
+handleTrusted('settings:get', async () => {
   const config = await getEffectiveEditableConfig();
   const localSettings = await loadLocalSettings();
   return {
@@ -1621,8 +1640,9 @@ ipcMain.handle('settings:get', async () => {
   };
 });
 
-ipcMain.handle('settings:save', async (_event, payload) => {
-  const saved = await saveLocalSettings(payload || {});
+handleTrusted('settings:save', async (_event, payload) => {
+  const validated = validateSettingsPayload(payload, EDITABLE_CONFIG_KEYS);
+  const saved = await saveLocalSettings(validated);
   const config = await getEffectiveEditableConfig();
   return {
     config,
@@ -1631,14 +1651,15 @@ ipcMain.handle('settings:save', async (_event, payload) => {
   };
 });
 
-ipcMain.handle('rpc-limiter:send-settings', async (_event, payload) => {
-  const sourceConfig = payload?.config && typeof payload.config === 'object' ? payload.config : payload;
+handleTrusted('rpc-limiter:send-settings', async (_event, payload) => {
+  const validated = validateSettingsPayload(payload, EDITABLE_CONFIG_KEYS, { allowAssetRules: false });
+  const sourceConfig = validated.config;
   return await sendSettingsToRpcLimiter(sourceConfig || {});
 });
 
-ipcMain.handle('rpc-limiter:get-status', async () => getRpcLimiterStatus());
+handleTrusted('rpc-limiter:get-status', async () => getRpcLimiterStatus());
 
-ipcMain.handle('settings:derive-hot-wallet', async (_event, secret) => {
+handleTrusted('settings:derive-hot-wallet', async (_event, secret) => {
   try {
     return { ok: true, address: getHotWalletAddressFromSecret(secret) };
   } catch (err) {
@@ -1646,25 +1667,23 @@ ipcMain.handle('settings:derive-hot-wallet', async (_event, secret) => {
   }
 });
 
-ipcMain.handle('bot:start', async () => {
+handleTrusted('bot:start', async () => {
   await startBotFromSettings();
   return { running: botRunning };
 });
 
-ipcMain.handle('bot:stop', async () => {
+handleTrusted('bot:stop', async () => {
   await stopBot();
   return { running: botRunning };
 });
 
-ipcMain.handle('bot:apply-running-settings', async (_event, payload) => {
+handleTrusted('bot:apply-running-settings', async (_event, payload) => {
   if (!bot || !botRunning) {
     return { ok: false, status: 'bot_not_running' };
   }
 
   const newConfig = await applyRunningSettingsToBot();
-  const requestedAssets = Array.isArray(payload?.assets)
-    ? payload.assets.map((asset) => String(asset || '').trim()).filter(Boolean)
-    : [];
+  const requestedAssets = validateAssetList(payload?.assets ?? []);
 
   if (!requestedAssets.length) {
     return { ok: true, status: 'config_applied', assets: [] };
@@ -1673,14 +1692,8 @@ ipcMain.handle('bot:apply-running-settings', async (_event, payload) => {
   return rerunAssetGroups(newConfig, requestedAssets);
 });
 
-ipcMain.handle('bot:cancel-order', async (_event, payload) => {
-  const asset = String(payload?.asset ?? '').trim();
-  const side = payload?.side === 'buy' ? 'buy' : 'sell';
-
-  if (!asset) {
-    logger.error('Cancel order failed: asset is required');
-    return { ok: false, status: 'invalid_request', asset, side };
-  }
+handleTrusted('bot:cancel-order', async (_event, payload) => {
+  const { asset, side } = validateAssetAndSide(payload);
 
   if (!bot || !botRunning) {
     logger.warn(`Cancel order requested for ${asset} [${side}] but bot is not running`);
@@ -1701,23 +1714,17 @@ ipcMain.handle('bot:cancel-order', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('bot:rerun-assets', async (_event, assets) => {
+handleTrusted('bot:rerun-assets', async (_event, assets) => {
   if (!bot || !botRunning) {
     return { ok: false, status: 'bot_not_running' };
   }
 
   const newConfig = await applyRunningSettingsToBot();
-  return rerunAssetGroups(newConfig, assets);
+  return rerunAssetGroups(newConfig, validateAssetList(assets));
 });
 
-ipcMain.handle('bot:redeem-certificate', async (_event, payload) => {
-  const asset = String(payload?.asset ?? '').trim();
-  const starbase = String(payload?.starbase ?? '').trim();
-
-  if (!asset) {
-    logger.error('Redeem certificate failed: asset is required');
-    return { ok: false, status: 'invalid_request', asset, starbase };
-  }
+handleTrusted('bot:redeem-certificate', async (_event, payload) => {
+  const { asset, starbase } = validateRedeemPayload(payload);
 
   if (!bot || !botRunning) {
     logger.warn(`Redeem certificate requested for ${asset} at ${starbase || 'any starbase'} but bot is not running`);
@@ -1738,7 +1745,7 @@ ipcMain.handle('bot:redeem-certificate', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('crew-deposit:status', async () => {
+handleTrusted('crew-deposit:status', async () => {
   if (!bot || !botRunning) {
     return {
       ok: true,
@@ -1765,7 +1772,7 @@ ipcMain.handle('crew-deposit:status', async () => {
   }
 });
 
-ipcMain.handle('crew-deposit:run', async (_event, payload) => {
+handleTrusted('crew-deposit:run', async (_event, payload) => {
   const count = Math.max(0, Math.floor(Number(payload?.count) || 0));
   const batchSize = Math.max(1, Math.floor(Number(payload?.batchSize) || 6));
 
@@ -1793,7 +1800,7 @@ ipcMain.handle('crew-deposit:run', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('hardware-transfer:state', async () => {
+handleTrusted('hardware-transfer:state', async () => {
   try {
     const config = await getEffectiveEditableConfig();
     return {
@@ -1816,7 +1823,7 @@ ipcMain.handle('hardware-transfer:state', async () => {
   }
 });
 
-ipcMain.handle('hardware-transfer:balances', async () => {
+handleTrusted('hardware-transfer:balances', async () => {
   try {
     return {
       ok: true,
@@ -1832,7 +1839,7 @@ ipcMain.handle('hardware-transfer:balances', async () => {
   }
 });
 
-ipcMain.handle('hardware-transfer:save-recipient', async (_event, payload) => {
+handleTrusted('hardware-transfer:save-recipient', async (_event, payload) => {
   try {
     return {
       ok: true,
@@ -1848,7 +1855,7 @@ ipcMain.handle('hardware-transfer:save-recipient', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('hardware-transfer:send', async (_event, payload) => {
+handleTrusted('hardware-transfer:send', async (_event, payload) => {
   const sendProgress = (message) => {
     _event.sender.send('hardware-transfer:progress', { message });
   };
@@ -1867,7 +1874,7 @@ ipcMain.handle('hardware-transfer:send', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('hardware-transfer:create-payload', async (_event, payload) => {
+handleTrusted('hardware-transfer:create-payload', async (_event, payload) => {
   const sendProgress = (message) => {
     _event.sender.send('hardware-transfer:progress', { message });
   };
@@ -1882,7 +1889,7 @@ ipcMain.handle('hardware-transfer:create-payload', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('hardware-transfer:sign-payload', async (_event, payload) => {
+handleTrusted('hardware-transfer:sign-payload', async (_event, payload) => {
   const sendProgress = (message) => {
     _event.sender.send('hardware-transfer:progress', { message });
   };
@@ -1897,7 +1904,7 @@ ipcMain.handle('hardware-transfer:sign-payload', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('hardware-transfer:broadcast-payload', async (_event, payload) => {
+handleTrusted('hardware-transfer:broadcast-payload', async (_event, payload) => {
   const sendProgress = (message) => {
     _event.sender.send('hardware-transfer:progress', { message });
   };
@@ -1914,7 +1921,7 @@ ipcMain.handle('hardware-transfer:broadcast-payload', async (_event, payload) =>
   }
 });
 
-ipcMain.handle('batch-token-transfer:state', async () => {
+handleTrusted('batch-token-transfer:state', async () => {
   try {
     const { hotWallet } = await getHotWalletTransferConfig();
     return {
@@ -1935,7 +1942,7 @@ ipcMain.handle('batch-token-transfer:state', async () => {
   }
 });
 
-ipcMain.handle('batch-token-transfer:balances', async () => {
+handleTrusted('batch-token-transfer:balances', async () => {
   try {
     return {
       ok: true,
@@ -1951,7 +1958,7 @@ ipcMain.handle('batch-token-transfer:balances', async () => {
   }
 });
 
-ipcMain.handle('batch-token-transfer:save-recipient', async (_event, payload) => {
+handleTrusted('batch-token-transfer:save-recipient', async (_event, payload) => {
   try {
     return {
       ok: true,
@@ -1967,7 +1974,7 @@ ipcMain.handle('batch-token-transfer:save-recipient', async (_event, payload) =>
   }
 });
 
-ipcMain.handle('batch-token-transfer:send', async (_event, payload) => {
+handleTrusted('batch-token-transfer:send', async (_event, payload) => {
   const sendProgress = (message) => {
     _event.sender.send('batch-token-transfer:progress', { message });
   };
@@ -1986,7 +1993,7 @@ ipcMain.handle('batch-token-transfer:send', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('bot:status', async () => {
+handleTrusted('bot:status', async () => {
   if (!bot) {
     return getEmptyStatusSnapshot();
   }
@@ -1999,11 +2006,11 @@ ipcMain.handle('bot:status', async () => {
   }
 });
 
-ipcMain.handle('updates:check', async () => {
+handleTrusted('updates:check', async () => {
   return await checkForUpdates();
 });
 
-ipcMain.handle('updates:download-and-restart', async () => {
+handleTrusted('updates:download-and-restart', async () => {
   return await downloadUpdateAndRestart();
 });
 
