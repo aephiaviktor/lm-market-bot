@@ -91,3 +91,10 @@ test('application window blocks renderer navigation and new windows', () => {
   assert.match(main, /setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\)/);
   assert.match(main, /on\('will-navigate', \(event\) => event\.preventDefault\(\)\)/);
 });
+
+test('renderer avoids HTML parsing sinks for dynamic application data', () => {
+  const renderer = fs.readFileSync(path.join(__dirname, '../electron/renderer.js'), 'utf8');
+  assert.doesNotMatch(renderer, /\.innerHTML\s*=/);
+  assert.doesNotMatch(renderer, /\.outerHTML\s*=/);
+  assert.doesNotMatch(renderer, /insertAdjacentHTML\s*\(/);
+});

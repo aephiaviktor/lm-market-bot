@@ -189,8 +189,8 @@ function isLikelySolanaAddress(value) {
 }
 
 function renderHardwareTransferRecipients() {
-  hardwareTransferRecipientList.innerHTML = '';
-  hardwareTransferRecipientSelect.innerHTML = '';
+  hardwareTransferRecipientList.replaceChildren();
+  hardwareTransferRecipientSelect.replaceChildren();
 
   const placeholder = document.createElement('option');
   placeholder.value = '';
@@ -215,7 +215,7 @@ function renderHardwareTransferRecipients() {
 }
 
 function renderHardwareTransferBalances() {
-  hardwareTransferTokenRows.innerHTML = '';
+  hardwareTransferTokenRows.replaceChildren();
   const balances = hardwareTransferState.balances || [];
   if (!balances.length) {
     const row = document.createElement('tr');
@@ -760,87 +760,33 @@ function renderAssetRuleRows() {
       return assetA.localeCompare(assetB, undefined, { numeric: true });
     });
 
-  assetRulesBody.innerHTML = '';
+  assetRulesBody.replaceChildren();
   addRuleRowBtn.disabled = options.length === 0 || starbaseOptions.length === 0;
   const emptyColspan = 10;
 
   if (!allOptions.length) {
-    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">Asset registry unavailable. Save a valid Aephia API Key in Settings to load the managed asset list.</td></tr>`;
+    appendTableEmptyState(assetRulesBody, 'Asset registry unavailable. Save a valid Aephia API Key in Settings to load the managed asset list.', emptyColspan);
     return;
   }
 
   if (!options.length) {
-    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">No assets available for this group.</td></tr>`;
+    appendTableEmptyState(assetRulesBody, 'No assets available for this group.', emptyColspan);
     return;
   }
 
   if (!starbaseOptions.length) {
-    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">No starbases configured for this faction.</td></tr>`;
+    appendTableEmptyState(assetRulesBody, 'No starbases configured for this faction.', emptyColspan);
     return;
   }
 
   if (!visibleRows.length) {
     const groupLabel = activeAssetRuleGroup === 'components' ? 'component' : 'raw material';
-    assetRulesBody.innerHTML = `<tr><td colspan="${emptyColspan}" class="empty-state">No ${groupLabel} rules yet. Use + Add Row.</td></tr>`;
+    appendTableEmptyState(assetRulesBody, `No ${groupLabel} rules yet. Use + Add Row.`, emptyColspan);
     return;
   }
 
   visibleRows.forEach(({ row, index }) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="refill-cell">
-        <input data-index="${index}" data-field="refill" type="checkbox" />
-      </td>
-      <td>
-        <select data-index="${index}" data-field="starbase"></select>
-      </td>
-      <td>
-        <select data-index="${index}" data-field="asset"></select>
-      </td>
-      <td>
-        <div class="cell-stack compact-cell">
-          <input data-index="${index}" data-field="minQuantity" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
-          <span class="cell-hint">Min order</span>
-        </div>
-      </td>
-      <td>
-        <div class="cell-stack compact-cell">
-          <input data-index="${index}" data-field="maxQuantity" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
-          <span class="cell-hint">Max active</span>
-        </div>
-      </td>
-      <td>
-        <div class="cell-stack price-cell">
-          <input data-index="${index}" data-field="minBuyPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
-          <span class="cell-hint">ATLAS</span>
-        </div>
-      </td>
-      <td>
-        <div class="cell-stack price-cell">
-          <input data-index="${index}" data-field="maxBuyPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
-          <span class="cell-hint">ATLAS</span>
-        </div>
-      </td>
-      <td>
-        <div class="cell-stack price-cell">
-          <input data-index="${index}" data-field="minSellPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
-          <span class="cell-hint">ATLAS</span>
-        </div>
-      </td>
-      <td>
-        <div class="cell-stack price-cell">
-          <input data-index="${index}" data-field="maxSellPrice" type="number" min="0" step="0.000001" inputmode="decimal" />
-          <span class="cell-hint">ATLAS</span>
-        </div>
-      </td>
-      <td class="remove-cell">
-        <div class="cell-stack">
-          <button type="button" class="cancel-order-btn" data-index="${index}">Cancel Order</button>
-          <button type="button" class="remove-row-btn" data-index="${index}">Remove</button>
-        </div>
-      </td>
-    `;
-
+    const tr = createAssetRuleRowElement(index);
     const starbaseSelect = tr.querySelector('[data-field="starbase"]');
     const assetSelect = tr.querySelector('[data-field="asset"]');
     const refillInput = tr.querySelector('[data-field="refill"]');
@@ -1094,6 +1040,82 @@ function appendBadge(parent, className, text) {
   return appendTextElement(parent, 'span', `badge ${className}`, text);
 }
 
+function appendTableEmptyState(parent, text, colspan) {
+  const row = document.createElement('tr');
+  const cell = document.createElement('td');
+  cell.colSpan = colspan;
+  cell.className = 'empty-state';
+  cell.textContent = text;
+  row.appendChild(cell);
+  parent.appendChild(row);
+}
+
+function createAssetRuleInput(index, field, type, attributes = {}) {
+  const input = document.createElement('input');
+  input.dataset.index = String(index);
+  input.dataset.field = field;
+  input.type = type;
+  for (const [key, value] of Object.entries(attributes)) {
+    if (key === 'className') input.className = value;
+    else input.setAttribute(key, value);
+  }
+  return input;
+}
+
+function createAssetRuleRowElement(index) {
+  const row = document.createElement('tr');
+  const refillCell = document.createElement('td');
+  refillCell.className = 'refill-cell';
+  refillCell.appendChild(createAssetRuleInput(index, 'refill', 'checkbox'));
+  row.appendChild(refillCell);
+
+  for (const field of ['starbase', 'asset']) {
+    const cell = document.createElement('td');
+    const select = document.createElement('select');
+    select.dataset.index = String(index);
+    select.dataset.field = field;
+    cell.appendChild(select);
+    row.appendChild(cell);
+  }
+
+  for (const [field, hint] of [['minQuantity', 'Min order'], ['maxQuantity', 'Max active']]) {
+    const cell = document.createElement('td');
+    const stack = document.createElement('div');
+    stack.className = 'cell-stack compact-cell';
+    stack.appendChild(createAssetRuleInput(index, field, 'text', {
+      inputmode: 'numeric', autocomplete: 'off', spellcheck: 'false',
+    }));
+    appendTextElement(stack, 'span', 'cell-hint', hint);
+    cell.appendChild(stack);
+    row.appendChild(cell);
+  }
+
+  for (const field of ['minBuyPrice', 'maxBuyPrice', 'minSellPrice', 'maxSellPrice']) {
+    const cell = document.createElement('td');
+    const stack = document.createElement('div');
+    stack.className = 'cell-stack price-cell';
+    stack.appendChild(createAssetRuleInput(index, field, 'number', {
+      min: '0', step: '0.000001', inputmode: 'decimal',
+    }));
+    appendTextElement(stack, 'span', 'cell-hint', 'ATLAS');
+    cell.appendChild(stack);
+    row.appendChild(cell);
+  }
+
+  const removeCell = document.createElement('td');
+  removeCell.className = 'remove-cell';
+  const buttonStack = document.createElement('div');
+  buttonStack.className = 'cell-stack';
+  for (const [className, text] of [['cancel-order-btn', 'Cancel Order'], ['remove-row-btn', 'Remove']]) {
+    const button = appendTextElement(buttonStack, 'button', className, text);
+    button.type = 'button';
+    button.dataset.index = String(index);
+  }
+  removeCell.appendChild(buttonStack);
+  row.appendChild(removeCell);
+  return row;
+}
+
 function formatNumber(value, maximumFractionDigits = 6) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return '—';
@@ -1281,154 +1303,125 @@ function sortByAssetRuleOrder(items, assetGetter) {
   });
 }
 
-function renderOpenOrders(orders) {
-  openOrdersListEl.innerHTML = '';
-  setListCount(openOrdersCountEl, orders.length);
+function appendMetric(parent, metricClass, labelClass, label, value) {
+  const metric = document.createElement('span');
+  metric.className = metricClass;
+  appendTextElement(metric, 'span', labelClass, label);
+  appendTextElement(metric, 'span', '', value);
+  parent.appendChild(metric);
+}
 
+function renderOpenOrders(orders) {
+  openOrdersListEl.replaceChildren();
+  setListCount(openOrdersCountEl, orders.length);
   if (!orders.length) {
-    openOrdersListEl.innerHTML = '<div class="empty-state">No open orders</div>';
+    appendEmptyState(openOrdersListEl, 'No open orders');
     return;
   }
 
   const sortedOrders = sortByAssetRuleOrder(orders, (order) => order?.asset);
-  sortedOrders.sort((a, b) => {
-    const starbaseComparison = compareStarbaseLabels(a?.starbase, b?.starbase);
-    if (starbaseComparison !== 0) {
-      return starbaseComparison;
-    }
-    return 0;
-  });
-
+  sortedOrders.sort((a, b) => compareStarbaseLabels(a?.starbase, b?.starbase));
   for (const order of sortedOrders) {
     const item = document.createElement('div');
     item.className = 'status-item order-item';
+    const top = document.createElement('div');
+    top.className = 'status-item-top';
+    const left = document.createElement('div');
+    left.className = 'order-left';
+    appendTextElement(left, 'span', 'inventory-starbase order-starbase', order.starbase || '—');
+    appendTextElement(left, 'span', 'order-asset', order.asset || 'Unknown Asset');
+    appendBadge(left, order.side === 'buy' ? 'buy' : 'sell', order.side || '—');
+    if (order.marketLeader === 'hb') appendBadge(left, 'leader', 'BB');
+    if (order.marketLeader === 'ba') appendBadge(left, 'leader', 'BA');
+    if (order.partiallyFilled) appendBadge(left, 'partial', 'Partial');
 
     const hasOriginalQuantity = typeof order.quantity === 'number' && Number.isFinite(order.quantity);
-    const isPartiallyFilled =
-      hasOriginalQuantity &&
-      typeof order.remaining === 'number' &&
-      Number.isFinite(order.remaining) &&
-      order.remaining < order.quantity;
+    const isPartiallyFilled = hasOriginalQuantity && typeof order.remaining === 'number'
+      && Number.isFinite(order.remaining) && order.remaining < order.quantity;
     const qtyLabel = isPartiallyFilled ? 'Remaining / Size' : 'Qty';
     const qtyText = isPartiallyFilled
       ? `${formatNumber(order.remaining, 0)} / ${formatNumber(order.quantity, 0)}`
       : formatNumber(order.remaining, 0);
-
-    item.innerHTML = `
-      <div class="status-item-top">
-        <div class="order-left">
-          <span class="inventory-starbase order-starbase">${order.starbase || '—'}</span>
-          <span class="order-asset">${order.asset || 'Unknown Asset'}</span>
-          <span class="badge ${order.side === 'buy' ? 'buy' : 'sell'}">${order.side}</span>
-          ${order.marketLeader === 'hb' ? '<span class="badge leader">BB</span>' : ''}
-          ${order.marketLeader === 'ba' ? '<span class="badge leader">BA</span>' : ''}
-          ${order.partiallyFilled ? '<span class="badge partial">Partial</span>' : ''}
-        </div>
-        <div class="order-right">
-          <span class="order-metric">
-            <span class="order-metric-label">Price</span>
-            <span>${formatNumber(order.price, 6)} ${order.currency || ''}</span>
-          </span>
-          <span class="order-metric">
-            <span class="order-metric-label">${qtyLabel}</span>
-            <span>${qtyText}</span>
-          </span>
-        </div>
-      </div>
-    `;
-
+    const right = document.createElement('div');
+    right.className = 'order-right';
+    appendMetric(right, 'order-metric', 'order-metric-label', 'Price', `${formatNumber(order.price, 6)} ${order.currency || ''}`);
+    appendMetric(right, 'order-metric', 'order-metric-label', qtyLabel, qtyText);
+    top.append(left, right);
+    item.appendChild(top);
     openOrdersListEl.appendChild(item);
   }
 }
 
 function renderInventory(items) {
-  inventoryListEl.innerHTML = '';
+  inventoryListEl.replaceChildren();
   const visibleItems = (Array.isArray(items) ? items : []).filter(
     (item) => typeof item?.balance === 'number' && Number.isFinite(item.balance) && item.balance > 0,
   );
   setListCount(inventoryCountEl, visibleItems.length);
-
   if (!visibleItems.length) {
-    inventoryListEl.innerHTML = '<div class="empty-state">All tracked cargo pod inventory is 0</div>';
+    appendEmptyState(inventoryListEl, 'All tracked cargo pod inventory is 0');
     return;
   }
 
   const sortedItems = [...visibleItems].sort((a, b) => {
     const starbaseComparison = compareStarbaseLabels(a?.starbase, b?.starbase);
-    if (starbaseComparison !== 0) {
-      return starbaseComparison;
-    }
-    return String(a?.asset || '').localeCompare(String(b?.asset || ''), undefined, { numeric: true });
+    return starbaseComparison || String(a?.asset || '').localeCompare(String(b?.asset || ''), undefined, { numeric: true });
   });
-
   for (const itemData of sortedItems) {
     const item = document.createElement('div');
     item.className = 'status-item inventory-item';
-
-    item.innerHTML = `
-      <div class="status-item-top">
-        <div class="inventory-left">
-          <span class="inventory-starbase">${itemData.starbase || '—'}</span>
-          <span class="inventory-asset">${itemData.asset || itemData.mint || 'Unknown Asset'}</span>
-        </div>
-        <div class="inventory-right">
-          <span class="inventory-metric">
-            <span class="inventory-metric-label">Balance</span>
-            <span>${formatNumber(itemData.balance, 6)}</span>
-          </span>
-        </div>
-      </div>
-    `;
-
+    const top = document.createElement('div');
+    top.className = 'status-item-top';
+    const left = document.createElement('div');
+    left.className = 'inventory-left';
+    appendTextElement(left, 'span', 'inventory-starbase', itemData.starbase || '—');
+    appendTextElement(left, 'span', 'inventory-asset', itemData.asset || itemData.mint || 'Unknown Asset');
+    const right = document.createElement('div');
+    right.className = 'inventory-right';
+    appendMetric(right, 'inventory-metric', 'inventory-metric-label', 'Balance', formatNumber(itemData.balance, 6));
+    top.append(left, right);
+    item.appendChild(top);
     inventoryListEl.appendChild(item);
   }
 }
 
 function renderCertificates(items) {
-  certificatesListEl.innerHTML = '';
+  certificatesListEl.replaceChildren();
   const visibleItems = (Array.isArray(items) ? items : []).filter(
     (item) => typeof item?.balance === 'number' && Number.isFinite(item.balance) && item.balance > 0,
   );
   setListCount(certificatesCountEl, visibleItems.length);
-
   if (!visibleItems.length) {
-    certificatesListEl.innerHTML = '<div class="empty-state">No wallet certificates</div>';
+    appendEmptyState(certificatesListEl, 'No wallet certificates');
     return;
   }
 
   const sortedItems = [...visibleItems].sort((a, b) => {
     const starbaseComparison = compareStarbaseLabels(a?.starbase, b?.starbase);
-    if (starbaseComparison !== 0) {
-      return starbaseComparison;
-    }
-    return String(a?.asset || '').localeCompare(String(b?.asset || ''), undefined, { numeric: true });
+    return starbaseComparison || String(a?.asset || '').localeCompare(String(b?.asset || ''), undefined, { numeric: true });
   });
-
-  sortedItems.forEach((itemData, index) => {
+  for (const itemData of sortedItems) {
     const item = document.createElement('div');
     item.className = 'status-item certificate-item';
+    const top = document.createElement('div');
+    top.className = 'status-item-top';
+    const left = document.createElement('div');
+    left.className = 'inventory-left';
+    appendTextElement(left, 'span', 'inventory-starbase', itemData.starbase || '—');
+    appendTextElement(left, 'span', 'inventory-asset', `${itemData.asset || itemData.rawMint || 'Unknown Asset'} Certificate`);
+    const right = document.createElement('div');
+    right.className = 'inventory-right';
+    appendMetric(right, 'inventory-metric', 'inventory-metric-label', 'Balance', formatNumber(itemData.balance, 0));
+    const button = appendTextElement(right, 'button', 'redeem-certificate-btn', 'Redeem');
+    button.type = 'button';
+    top.append(left, right);
 
-    item.innerHTML = `
-      <div class="status-item-top">
-        <div class="inventory-left">
-          <span class="inventory-starbase">${itemData.starbase || '—'}</span>
-          <span class="inventory-asset">${itemData.asset || itemData.rawMint || 'Unknown Asset'} Certificate</span>
-        </div>
-        <div class="inventory-right">
-          <span class="inventory-metric">
-            <span class="inventory-metric-label">Balance</span>
-            <span>${formatNumber(itemData.balance, 0)}</span>
-          </span>
-          <button type="button" class="redeem-certificate-btn" data-index="${index}">Redeem</button>
-        </div>
-      </div>
-      <div class="status-item-row">
-        <span class="status-item-subtle">Mint</span>
-        <span class="status-item-value" title="${itemData.certificateMint || ''}">${shortenWallet(itemData.certificateMint || '—')}</span>
-      </div>
-    `;
+    const mintRow = document.createElement('div');
+    mintRow.className = 'status-item-row';
+    appendTextElement(mintRow, 'span', 'status-item-subtle', 'Mint');
+    appendTextElement(mintRow, 'span', 'status-item-value', shortenWallet(itemData.certificateMint || '—'), itemData.certificateMint || '');
+    item.append(top, mintRow);
 
-    const button = item.querySelector('.redeem-certificate-btn');
     button.addEventListener('click', async () => {
       button.disabled = true;
       const asset = String(itemData.ruleAsset || itemData.asset || '').trim();
@@ -1436,8 +1429,7 @@ function renderCertificates(items) {
       appendLog(`[${new Date().toISOString()}] [INFO] Redeeming ${asset} certificate balance at ${starbase}...`);
       try {
         const result = await window.botApi.redeemCertificate({ asset, starbase });
-        const status = result?.status ?? 'unknown';
-        appendLog(`[${new Date().toISOString()}] [INFO] Redeem certificate ${status} for ${asset} at ${starbase}`);
+        appendLog(`[${new Date().toISOString()}] [INFO] Redeem certificate ${result?.status ?? 'unknown'} for ${asset} at ${starbase}`);
         await refreshBotStatus();
       } catch (err) {
         appendLog(`[${new Date().toISOString()}] [ERROR] Redeem certificate failed: ${err?.message || String(err)}`);
@@ -1445,115 +1437,67 @@ function renderCertificates(items) {
         button.disabled = false;
       }
     });
-
     certificatesListEl.appendChild(item);
-  });
+  }
 }
 
 function getActivityTitle(entry) {
-  if (entry.event === 'START') {
-    return 'Bot Start';
-  }
-  if (entry.event === 'NO_CHANGES') {
-    return 'No Changes';
-  }
-  if (entry.event === 'CYCLE_OK') {
-    return 'Cycle Complete';
-  }
-  if (entry.event === 'FILLED') {
-    return ['FILLED', entry.resource || entry.asset || ''].filter(Boolean).join(' · ');
-  }
+  if (entry.event === 'START') return 'Bot Start';
+  if (entry.event === 'NO_CHANGES') return 'No Changes';
+  if (entry.event === 'CYCLE_OK') return 'Cycle Complete';
+  if (entry.event === 'FILLED') return ['FILLED', entry.resource || entry.asset || ''].filter(Boolean).join(' · ');
   return [entry.event, entry.resource || entry.asset || ''].filter(Boolean).join(' · ');
 }
 
 function getActivityTone(entry) {
-  if (entry.event === 'FILLED') {
-    return 'filled';
-  }
-  if (entry.event === 'START') {
-    return 'start';
-  }
+  if (entry.event === 'FILLED') return 'filled';
+  if (entry.event === 'START') return 'start';
   return 'default';
 }
 
-function getActivityBadge(entry) {
-  if (entry.event === 'FILLED') {
-    return '<span class="badge activity-badge filled">FILLED</span>';
-  }
-  if (entry.event === 'START') {
-    return '<span class="badge activity-badge start">START</span>';
-  }
-  return '';
+function appendActivityBadge(parent, entry) {
+  if (entry.event === 'FILLED') appendBadge(parent, 'activity-badge filled', 'FILLED');
+  if (entry.event === 'START') appendBadge(parent, 'activity-badge start', 'START');
 }
 
 function renderRecentActivity(items) {
-  recentActivityListEl.innerHTML = '';
+  recentActivityListEl.replaceChildren();
   setListCount(recentActivityCountEl, items.length);
-
   if (!items.length) {
-    recentActivityListEl.innerHTML = '<div class="empty-state">No recent activity</div>';
+    appendEmptyState(recentActivityListEl, 'No recent activity');
     return;
   }
 
   for (const entry of items) {
-    const tone = getActivityTone(entry);
     const item = document.createElement('div');
-    item.className = `status-item activity-item activity-item-${tone}`;
-
-    const title = getActivityTitle(entry);
-    const badge = getActivityBadge(entry);
+    item.className = `status-item activity-item activity-item-${getActivityTone(entry)}`;
+    const top = document.createElement('div');
+    top.className = 'status-item-top';
+    const left = document.createElement('div');
+    left.className = 'activity-left';
+    appendTextElement(left, 'span', 'activity-title', getActivityTitle(entry) || 'Activity');
+    appendActivityBadge(left, entry);
+    const right = document.createElement('div');
+    right.className = 'activity-right';
+    appendMetric(right, 'activity-metric', 'activity-metric-label', 'At', formatTimestamp(entry.timestamp));
+    top.append(left, right);
 
     const details = [];
-    if (entry.side) {
-      details.push(entry.side);
-    }
-    if (typeof entry.price === 'number') {
-      details.push(`P ${formatNumber(entry.price, 6)}`);
-    }
-    if (typeof entry.quantity === 'number') {
-      details.push(`Q ${formatNumber(entry.quantity, 0)}`);
-    }
-    if (typeof entry.remaining === 'number') {
-      details.push(`R ${formatNumber(entry.remaining, 0)}`);
-    }
-    if (typeof entry.rulesChecked === 'number') {
-      details.push(`${entry.rulesChecked} rules`);
-    }
-    if (typeof entry.changes === 'number') {
-      details.push(`${entry.changes} changes`);
-    }
-    if (typeof entry.skips === 'number') {
-      details.push(`${entry.skips} skips`);
-    }
-    if (typeof entry.errors === 'number') {
-      details.push(`${entry.errors} errors`);
-    }
-    if (typeof entry.nextDelayMinutes === 'number') {
-      details.push(`next ${entry.nextDelayMinutes}m`);
-    }
-    if (entry.message) {
-      details.push(entry.message);
-    }
-
-    item.innerHTML = `
-      <div class="status-item-top">
-        <div class="activity-left">
-          <span class="activity-title">${title || 'Activity'}</span>
-          ${badge}
-        </div>
-        <div class="activity-right">
-          <span class="activity-metric">
-            <span class="activity-metric-label">At</span>
-            <span>${formatTimestamp(entry.timestamp)}</span>
-          </span>
-        </div>
-      </div>
-      <div class="status-item-row">
-        <span class="status-item-subtle">Details</span>
-        <span class="status-item-value">${details.join(' · ') || '—'}</span>
-      </div>
-    `;
-
+    if (entry.side) details.push(entry.side);
+    if (typeof entry.price === 'number') details.push(`P ${formatNumber(entry.price, 6)}`);
+    if (typeof entry.quantity === 'number') details.push(`Q ${formatNumber(entry.quantity, 0)}`);
+    if (typeof entry.remaining === 'number') details.push(`R ${formatNumber(entry.remaining, 0)}`);
+    if (typeof entry.rulesChecked === 'number') details.push(`${entry.rulesChecked} rules`);
+    if (typeof entry.changes === 'number') details.push(`${entry.changes} changes`);
+    if (typeof entry.skips === 'number') details.push(`${entry.skips} skips`);
+    if (typeof entry.errors === 'number') details.push(`${entry.errors} errors`);
+    if (typeof entry.nextDelayMinutes === 'number') details.push(`next ${entry.nextDelayMinutes}m`);
+    if (entry.message) details.push(entry.message);
+    const detailRow = document.createElement('div');
+    detailRow.className = 'status-item-row';
+    appendTextElement(detailRow, 'span', 'status-item-subtle', 'Details');
+    appendTextElement(detailRow, 'span', 'status-item-value', details.join(' · ') || '—');
+    item.append(top, detailRow);
     recentActivityListEl.appendChild(item);
   }
 }
