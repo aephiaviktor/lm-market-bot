@@ -701,7 +701,7 @@ type DesiredSellOrder = {
   quoteSymbol: 'ATLAS' | 'USDC';
 };
 
-type OrderSnapshot = {
+export type OrderSnapshot = {
   price: number;
   remaining: number;
   quantity?: number;
@@ -718,7 +718,36 @@ type ResourceOrderState = {
   sell: ResourceSideOrderState;
 };
 
-type BotState = Record<string, ResourceOrderState>;
+export type BotState = Record<string, ResourceOrderState>;
+
+export type TrackedOrderTransition =
+  | { kind: 'partial-fill'; filledDelta: number; remaining: number }
+  | { kind: 'full-fill'; filledDelta: number; remaining: 0 }
+  | null;
+
+export function classifyTrackedOrderTransition(
+  previous: OrderSnapshot,
+  currentRemaining: number | null,
+  wasCancelled: boolean,
+): TrackedOrderTransition {
+  if (currentRemaining !== null) {
+    if (currentRemaining < previous.remaining) {
+      return {
+        kind: 'partial-fill',
+        filledDelta: previous.remaining - currentRemaining,
+        remaining: currentRemaining,
+      };
+    }
+    return null;
+  }
+
+  if (wasCancelled) return null;
+  return {
+    kind: 'full-fill',
+    filledDelta: previous.remaining,
+    remaining: 0,
+  };
+}
 
 type CargoPodTokenAccountInfo = {
   cargoPod: PublicKey;
@@ -1667,7 +1696,7 @@ function groupRulesByAsset(rules: AssetRuleConfig[]): Map<string, GroupedAssetRu
   return grouped;
 }
 
-function normalizeLoadedState(parsed: unknown, trackedResources: ResourceConfig[]): BotState {
+export function normalizeLoadedState(parsed: unknown, trackedResources: ResourceConfig[]): BotState {
   if (!parsed || typeof parsed !== 'object') {
     return {};
   }
@@ -3591,29 +3620,30 @@ export class LmMarketBot {
 
     for (const [orderId, meta] of Object.entries(sideState.openOrders)) {
       const currentOrder = currentById.get(orderId);
-      if (currentOrder) {
-        const currentRemaining = getOrderRemainingQuantity(currentOrder);
-        if (currentRemaining < meta.remaining) {
-          const filledDelta = meta.remaining - currentRemaining;
-          await this.appendLog({
-            event: 'FILLED',
-            side,
-            resource: resource.name,
-            mint: resource.mint.toBase58(),
-            orderId,
-            price: meta.price,
-            quantity: meta.quantity,
-            filledDelta,
-            remaining: currentRemaining,
-            message: `Filled +${filledDelta}. Remaining ${currentRemaining}/${meta.quantity ?? meta.remaining}`,
-          });
-        }
-      }
-
       const wasCancelled =
         cancelledIds.has(orderId) || this.recentlyCancelledOrderIds.has(orderId);
+      const transition = classifyTrackedOrderTransition(
+        meta,
+        currentOrder ? getOrderRemainingQuantity(currentOrder) : null,
+        wasCancelled,
+      );
 
-      if (!currentIds.has(orderId) && !wasCancelled) {
+      if (transition?.kind === 'partial-fill') {
+        await this.appendLog({
+          event: 'FILLED',
+          side,
+          resource: resource.name,
+          mint: resource.mint.toBase58(),
+          orderId,
+          price: meta.price,
+          quantity: meta.quantity,
+          filledDelta: transition.filledDelta,
+          remaining: transition.remaining,
+          message: `Filled +${transition.filledDelta}. Remaining ${transition.remaining}/${meta.quantity ?? meta.remaining}`,
+        });
+      }
+
+      if (transition?.kind === 'full-fill') {
         await this.appendLog({
           event: 'FILLED',
           side,

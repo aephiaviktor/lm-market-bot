@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.73",
+  "version": "0.2.74",
   "description": "",
   "main": "electron/main.js",
   "scripts": {
