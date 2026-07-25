@@ -29,6 +29,12 @@ const FULL_RESTART_CONFIG_KEYS = new Set([
   'USE_RPC_LIMITER',
   'RESOURCE_LIST',
 ]);
+const secureFieldNames = new Set([
+  'AEPHIA_API_KEY',
+  'RPC_URL',
+  'RPC_URL_FALLBACK',
+  'HOT_WALLET_SECRET',
+]);
 const RERUN_ALL_ASSETS_CONFIG_KEYS = new Set([
   'MIN_SELL_QUANTITY',
   'MIN_PRICE',
@@ -989,13 +995,18 @@ function readFormConfig() {
   return data;
 }
 
-function writeFormConfig(config) {
+function writeFormConfig(config, secureSettingsStatus = {}) {
   assetRegistryResourceList = String(config?.RESOURCE_LIST ?? '');
   for (const key of fields) {
     const element = form.elements.namedItem(key);
     if (element) {
       if (element.type === 'checkbox') {
         element.checked = parseBoolean(config[key]);
+      } else if (secureFieldNames.has(key)) {
+        element.value = '';
+        element.placeholder = secureSettingsStatus[key]
+          ? 'Stored securely — enter a new value to replace'
+          : 'Enter a value to store securely';
       } else {
         element.value = config[key] ?? '';
       }
@@ -1061,6 +1072,26 @@ async function updateDisplayAccounts() {
 function appendLog(line) {
   logsEl.textContent += `${line}\n`;
   logsEl.scrollTop = logsEl.scrollHeight;
+}
+
+function appendTextElement(parent, tagName, className, text, title) {
+  const element = document.createElement(tagName);
+  if (className) element.className = className;
+  element.textContent = text;
+  if (title !== undefined) element.title = title;
+  parent.appendChild(element);
+  return element;
+}
+
+function appendEmptyState(parent, text) {
+  const element = document.createElement('div');
+  element.className = 'empty-state';
+  element.textContent = text;
+  parent.appendChild(element);
+}
+
+function appendBadge(parent, className, text) {
+  return appendTextElement(parent, 'span', `badge ${className}`, text);
 }
 
 function formatNumber(value, maximumFractionDigits = 6) {
@@ -1758,6 +1789,7 @@ async function saveAllSettings() {
     assetRules: assetRuleRows,
   };
   const result = await window.botApi.saveSettings(payload);
+  writeFormConfig(result.config || {}, result.secureSettingsStatus || {});
   renderRpcLimiterStatus(result.rpcLimiter);
   assetRuleRows = Array.isArray(result.assetRules) ? normalizeAssetRuleRows(result.assetRules) : assetRuleRows;
   return result;
@@ -1765,7 +1797,7 @@ async function saveAllSettings() {
 
 async function boot() {
   const state = await window.botApi.getSettings();
-  writeFormConfig(state.config);
+  writeFormConfig(state.config, state.secureSettingsStatus || {});
   renderRpcLimiterStatus(state.rpcLimiter);
   assetRuleRows = Array.isArray(state.assetRules) ? normalizeAssetRuleRows(state.assetRules) : buildDefaultAssetRuleRows();
   ensureAssetRuleRows();
