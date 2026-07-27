@@ -50,6 +50,7 @@ import {
   type AssetRegistryGroup,
 } from './asset-registry';
 import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './starbase-registry';
+import { appendBoundedJsonLine, readJsonlTail } from './reliability-policy';
 
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
 const COMPUTE_BUDGET_PROGRAM_ID = new PublicKey('ComputeBudget111111111111111111111111111111');
@@ -77,6 +78,11 @@ const RPC_ACCOUNT_INFO_CACHE_TTL_MS = 60000;
 const RPC_LATEST_BLOCKHASH_REUSE_MS = 45000;
 const RPC_RENT_EXEMPTION_CACHE_TTL_MS = 3600000;
 const RPC_METHOD_COUNTER_LOG_INTERVAL_MS = 300000;
+const ACTIVITY_LOG_MAX_BYTES = 8 * 1024 * 1024;
+const RPC_COUNTER_LOG_MAX_BYTES = 4 * 1024 * 1024;
+const LOG_RETAINED_FILES = 3;
+const RECENT_ACTIVITY_READ_BYTES = 2 * 1024 * 1024;
+const RECENT_ACTIVITY_MAX_ENTRIES = 500;
 // Keep this as a runtime require so TypeScript keeps emitting dist/bot.js.
 const packageJson = require('../package.json') as { version?: string };
 const APP_VERSION = packageJson.version || 'unknown';
@@ -278,6 +284,7 @@ function createFailoverConnection(
   useSharedLimiter: () => boolean,
   metricsProfile: string,
   recordRpcMethodCounters?: (snapshot: RpcMethodCounterSnapshot) => void,
+  recordRpcCall?: (method: string, field: RpcCounterField) => void,
 ): Connection {
   const connectionConfig = { commitment: 'confirmed' as const, disableRetryOnRateLimit: true };
   const primary = new Connection(primaryUrl, connectionConfig);
@@ -368,6 +375,7 @@ function createFailoverConnection(
   const countRpcMethod = (method: string, field: RpcCounterField): void => {
     getRpcMethodCounter(rpcMethodCounters, method)[field] += 1;
     getRpcMethodCounter(rpcIntervalMethodCounters, method)[field] += 1;
+    recordRpcCall?.(method, field);
     const now = Date.now();
     if (now - lastRpcMethodCounterLogAtMs < RPC_METHOD_COUNTER_LOG_INTERVAL_MS) {
       return;
@@ -994,6 +1002,8 @@ type CycleStats = {
   skips: number;
   errors: number;
   retryableSkips: number;
+  rpc: RpcMethodCounter;
+  rpcByMethod: Record<string, RpcMethodCounter>;
 };
 
 export type BotRuleHealthStatus = {
@@ -1919,8 +1929,11 @@ export class LmMarketBot {
   private readonly cargoPodTokenInventoryCache = new Map<string, CargoPodTokenInventoryCacheEntry>();
   private solBalanceCache: ExpiringPromiseCacheEntry<number> | null = null;
   private statusSnapshotCache: { expiresAt: number; snapshot: BotStatusSnapshot } | null = null;
+  private statusSnapshotInFlight: Promise<BotStatusSnapshot> | null = null;
   private currentCycleStats: CycleStats | null = null;
   private consecutiveNoChangeCycles = 0;
+  private activityLogWriteQueue: Promise<void> = Promise.resolve();
+  private rpcCounterWriteQueue: Promise<void> = Promise.resolve();
   private transactionSubmissionQueue: Promise<void> = Promise.resolve();
   private nextTransactionSubmitAtMs = 0;
 
@@ -1943,6 +1956,14 @@ export class LmMarketBot {
       this.config.faction,
       (snapshot) => {
         void this.appendRpcCounterSnapshot(snapshot);
+      },
+      (method, field) => {
+        const stats = this.currentCycleStats;
+        if (!stats) return;
+        stats.rpc[field] += 1;
+        const methodCounter = stats.rpcByMethod[method] ?? { network: 0, fallback: 0, cache: 0, joined: 0 };
+        methodCounter[field] += 1;
+        stats.rpcByMethod[method] = methodCounter;
       },
     );
     const provider = new AnchorProvider(this.connection, new Wallet(this.wallet), AnchorProvider.defaultOptions());
@@ -2070,10 +2091,16 @@ export class LmMarketBot {
   }
 
   async getStatusSnapshot(): Promise<BotStatusSnapshot> {
-    if (this.statusSnapshotCache && Date.now() < this.statusSnapshotCache.expiresAt) {
-      return this.statusSnapshotCache.snapshot;
-    }
+    if (this.statusSnapshotCache && Date.now() < this.statusSnapshotCache.expiresAt) return this.statusSnapshotCache.snapshot;
+    if (this.statusSnapshotInFlight) return await this.statusSnapshotInFlight;
+    const pending = this.buildStatusSnapshot().finally(() => {
+      if (this.statusSnapshotInFlight === pending) this.statusSnapshotInFlight = null;
+    });
+    this.statusSnapshotInFlight = pending;
+    return await pending;
+  }
 
+  private async buildStatusSnapshot(): Promise<BotStatusSnapshot> {
     const wallet = this.wallet.publicKey.toBase58();
 
     const solBalance = await this.getSolBalance();
@@ -3131,12 +3158,14 @@ export class LmMarketBot {
   }
 
   private async appendRpcCounterSnapshot(snapshot: RpcMethodCounterSnapshot): Promise<void> {
-    try {
+    const write = this.rpcCounterWriteQueue.then(async () => {
       await fs.mkdir(this.analysisPath, { recursive: true });
-      await fs.appendFile(this.rpcCounterFilePath, `${JSON.stringify(snapshot)}\n`, 'utf8');
-    } catch (err) {
+      await appendBoundedJsonLine(this.rpcCounterFilePath, snapshot, RPC_COUNTER_LOG_MAX_BYTES, LOG_RETAINED_FILES);
+    });
+    this.rpcCounterWriteQueue = write.catch((err) => {
       this.logger.warn('Failed to write RPC method counter snapshot:', err);
-    }
+    });
+    await this.rpcCounterWriteQueue;
   }
 
   private async loadState(): Promise<BotState> {
@@ -3165,7 +3194,12 @@ export class LmMarketBot {
 
   private async appendLog(event: Record<string, unknown>) {
     const payload = { timestamp: new Date().toISOString(), ...event };
-    await fs.appendFile(this.logFilePath, JSON.stringify(payload) + '\n', 'utf8');
+    const write = this.activityLogWriteQueue.then(() =>
+      appendBoundedJsonLine(this.logFilePath, payload, ACTIVITY_LOG_MAX_BYTES, LOG_RETAINED_FILES));
+    this.activityLogWriteQueue = write.catch((err) => {
+      this.logger.warn('Failed to write activity log:', err);
+    });
+    await write;
     this.trackCycleLogEvent(event);
   }
 
@@ -4863,6 +4897,8 @@ export class LmMarketBot {
       skips: stats.skips,
       errors: stats.errors,
       retryableSkips: stats.retryableSkips,
+      rpc: stats.rpc,
+      rpcByMethod: stats.rpcByMethod,
       durationMs,
       nextDelayMinutes,
       message: cleanNoChange
@@ -5234,43 +5270,25 @@ export class LmMarketBot {
 
   private async readRecentActivity(sinceTimestamp?: string | null): Promise<BotRecentActivity[]> {
     try {
-      const raw = await fs.readFile(this.logFilePath, 'utf8');
-      const lines = raw
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean);
-
+      const records = await readJsonlTail(this.logFilePath, RECENT_ACTIVITY_READ_BYTES, RECENT_ACTIVITY_MAX_ENTRIES);
       const sinceMs = sinceTimestamp ? new Date(sinceTimestamp).getTime() : Number.NaN;
-      const result: BotRecentActivity[] = [];
-
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const parsed = JSON.parse(lines[i]) as Record<string, unknown>;
-          const timestamp = typeof parsed.timestamp === 'string' ? parsed.timestamp : new Date().toISOString();
-          const timestampMs = new Date(timestamp).getTime();
-
-          if (Number.isFinite(sinceMs) && Number.isFinite(timestampMs) && timestampMs < sinceMs) {
-            continue;
-          }
-
-          result.push({
-            timestamp,
-            event: typeof parsed.event === 'string' ? parsed.event : 'LOG',
-            side: parsed.side === 'buy' || parsed.side === 'sell' ? parsed.side : undefined,
-            asset: typeof parsed.asset === 'string' ? parsed.asset : undefined,
-            resource: typeof parsed.resource === 'string' ? parsed.resource : undefined,
-            message: typeof parsed.message === 'string' ? parsed.message : undefined,
-            price: typeof parsed.price === 'number' ? parsed.price : undefined,
-            quantity: typeof parsed.quantity === 'number' ? parsed.quantity : undefined,
-            remaining: typeof parsed.remaining === 'number' ? parsed.remaining : undefined,
-            tx: typeof parsed.tx === 'string' ? parsed.tx : undefined,
-          });
-        } catch {
-          continue;
-        }
-      }
-
-      return result;
+      return records.flatMap((parsed): BotRecentActivity[] => {
+        const timestamp = typeof parsed.timestamp === 'string' ? parsed.timestamp : new Date().toISOString();
+        const timestampMs = new Date(timestamp).getTime();
+        if (Number.isFinite(sinceMs) && Number.isFinite(timestampMs) && timestampMs < sinceMs) return [];
+        return [{
+          timestamp,
+          event: typeof parsed.event === 'string' ? parsed.event : 'LOG',
+          side: parsed.side === 'buy' || parsed.side === 'sell' ? parsed.side : undefined,
+          asset: typeof parsed.asset === 'string' ? parsed.asset : undefined,
+          resource: typeof parsed.resource === 'string' ? parsed.resource : undefined,
+          message: typeof parsed.message === 'string' ? parsed.message : undefined,
+          price: typeof parsed.price === 'number' ? parsed.price : undefined,
+          quantity: typeof parsed.quantity === 'number' ? parsed.quantity : undefined,
+          remaining: typeof parsed.remaining === 'number' ? parsed.remaining : undefined,
+          tx: typeof parsed.tx === 'string' ? parsed.tx : undefined,
+        }];
+      });
     } catch {
       return [];
     }
@@ -5416,6 +5434,8 @@ export class LmMarketBot {
       skips: 0,
       errors: 0,
       retryableSkips: 0,
+      rpc: { network: 0, fallback: 0, cache: 0, joined: 0 },
+      rpcByMethod: {},
     };
     this.currentCycleStats = stats;
 
