@@ -71,12 +71,14 @@ function validateSettingsPayload(payload, editableConfigKeys, options = {}) {
 
 function validateAssetAndSide(payload) {
   assertPlainObject(payload, 'cancel-order payload');
-  assertKnownKeys(payload, new Set(['asset', 'side']), 'cancel-order');
+  assertKnownKeys(payload, new Set(['asset', 'starbase', 'side']), 'cancel-order');
   const asset = typeof payload.asset === 'string' ? payload.asset.trim() : '';
+  const starbase = typeof payload.starbase === 'string' ? payload.starbase.trim() : '';
   if (!asset) throw new TypeError('asset is required.');
+  if (!starbase) throw new TypeError('starbase is required.');
   if (asset.length > MAX_ASSET_LENGTH) throw new RangeError('asset is too long.');
   if (payload.side !== 'buy' && payload.side !== 'sell') throw new TypeError('side must be buy or sell.');
-  return { asset, side: payload.side };
+  return { asset, starbase, side: payload.side };
 }
 
 function validateAssetList(assets) {

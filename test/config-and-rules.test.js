@@ -13,7 +13,7 @@ const strategyRow = {
   starbase: 'MRZ-1',
   asset: 'Iron Ore',
   group: 'raw',
-  refill: false,
+  enabled: false,
   minQuantity: '10',
   maxQuantity: '20',
   minBuyPrice: '0.1',
@@ -42,7 +42,7 @@ test('strategy rows expand into bounded buy and sell rules', () => {
       quantity: 20,
       limit: 20,
       price: 0.2,
-      refill: false,
+      enabled: false,
       minQuantity: 10,
       minPrice: 0.1,
       maxPrice: 0.2,
@@ -55,7 +55,7 @@ test('strategy rows expand into bounded buy and sell rules', () => {
       quantity: 10,
       limit: 20,
       price: 0.3,
-      refill: false,
+      enabled: false,
       minQuantity: 10,
       minPrice: 0.3,
       maxPrice: 0.4,
@@ -100,11 +100,16 @@ test('legacy rows preserve order side, quantity, limit, and price', () => {
     quantity: 25,
     limit: 40,
     price: 0.005,
-    refill: true,
+    enabled: true,
     minQuantity: 25,
     minPrice: null,
     maxPrice: null,
   });
+});
+
+test('legacy refill values migrate to enabled', () => {
+  const [rule] = parseAssetRules([{ ...strategyRow, enabled: undefined, refill: false }]);
+  assert.equal(rule.enabled, false);
 });
 
 test('bot config validates required secret and numeric safety bounds', () => {

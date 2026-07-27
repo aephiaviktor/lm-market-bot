@@ -592,6 +592,7 @@ export type AssetRuleInput = {
   quantity?: string | number | null;
   limit?: string | number | null;
   price?: string | number | null;
+  enabled?: boolean | string | number | null;
   refill?: boolean | string | number | null;
   minQuantity?: string | number | null;
   maxQuantity?: string | number | null;
@@ -609,11 +610,20 @@ export type AssetRuleConfig = {
   quantity: number;
   limit: number | null;
   price: number;
-  refill: boolean;
+  enabled: boolean;
   minQuantity: number;
   minPrice: number | null;
   maxPrice: number | null;
 };
+
+export function getRuleExecutionPolicy(
+  rule: Pick<AssetRuleConfig, 'enabled'>,
+  activeOrders: Array<{ id: string }>,
+) {
+  return rule.enabled === false
+    ? { cancelOrderIds: activeOrders.map((order) => order.id), shouldPlaceOrder: false }
+    : { cancelOrderIds: [], shouldPlaceOrder: true };
+}
 
 export type BotInputConfig = {
   AEPHIA_API_KEY?: string;
@@ -1269,7 +1279,7 @@ function parseLegacyAssetRule(input: AssetRuleInput, index?: number): AssetRuleC
     quantity,
     limit,
     price,
-    refill: true,
+    enabled: parseOptionalBoolean(input.enabled ?? input.refill, true),
     minQuantity: side === 'buy' ? 1 : quantity,
     minPrice: null,
     maxPrice: null,
@@ -1287,7 +1297,7 @@ function parseStrategyAssetRule(input: AssetRuleInput, index?: number): AssetRul
     throw new Error(`${label}.maxQuantity must be greater than or equal to minQuantity`);
   }
 
-  const refill = parseOptionalBoolean(input.refill, true);
+  const enabled = parseOptionalBoolean(input.enabled ?? input.refill, true);
   const minBuyPrice = parseOptionalRulePrice(input.minBuyPrice, label + '.minBuyPrice');
   const maxBuyPrice = parseOptionalRulePrice(input.maxBuyPrice, label + '.maxBuyPrice');
   const minSellPrice = parseOptionalRulePrice(input.minSellPrice, label + '.minSellPrice');
@@ -1306,7 +1316,7 @@ function parseStrategyAssetRule(input: AssetRuleInput, index?: number): AssetRul
       quantity: maxQuantity,
       limit: maxQuantity,
       price: maxBuyPrice,
-      refill,
+      enabled,
       minQuantity,
       minPrice: minBuyPrice,
       maxPrice: maxBuyPrice,
@@ -1325,7 +1335,7 @@ function parseStrategyAssetRule(input: AssetRuleInput, index?: number): AssetRul
       quantity: minQuantity,
       limit: maxQuantity,
       price: minSellPrice,
-      refill,
+      enabled,
       minQuantity,
       minPrice: minSellPrice,
       maxPrice: maxSellPrice,
@@ -2111,15 +2121,23 @@ export class LmMarketBot {
     return snapshot;
   }
 
-  async cancelActiveOrderForRule(asset: string, side: AssetRuleSide): Promise<CancelOrderResult> {
+  async cancelActiveOrderForRule(asset: string, starbase: string, side: AssetRuleSide): Promise<CancelOrderResult> {
     const normalizedSide = parseAssetRuleSide(side, 'cancelOrder.side');
-    const resource = parseResourceEntry(asset, 'cancelOrder.asset');
+    const rule = this.config.assetRules.find((candidate) =>
+      candidate.asset === asset && candidate.starbase === starbase && candidate.side === normalizedSide);
+    if (!rule) throw new Error(`No ${normalizedSide} rule found for ${asset} at ${starbase}.`);
+    const baseResource = resolveResourceForRule(rule);
+    const localMarketContext = normalizedSide === 'sell'
+      ? await this.resolveLocalMarketSellContext(rule, baseResource)
+      : null;
+    const resource = localMarketContext?.certificateResource ?? baseResource;
     const cancelledIds = new Set<string>();
 
     try {
       const myOrdersRaw = await this.readMyOpenOrdersForResource(resource, { refresh: true });
       const myOrders = myOrdersRaw.filter((o) => o.orderType === getSideOrderType(normalizedSide));
-      const activeOrder = sortOrdersForSide(normalizedSide, myOrders)[0];
+      const activeOrders = sortOrdersForSide(normalizedSide, myOrders);
+      const activeOrder = activeOrders[0];
 
       if (!activeOrder) {
         this.logger.info(`No active ${normalizedSide} order found for ${resource.name}.`);
@@ -2133,7 +2151,10 @@ export class LmMarketBot {
         return { ok: true, status: 'no_active_order', asset, side: normalizedSide };
       }
 
-      const tx = await this.cancelOrder(activeOrder, resource, normalizedSide, cancelledIds);
+      let tx = '';
+      for (const order of activeOrders) {
+        tx = await this.cancelOrder(order, resource, normalizedSide, cancelledIds);
+      }
 
       this.invalidateMarketLeaderCacheForMint(resource.mint.toBase58());
       const refreshedOrdersRaw = await this.readMyOpenOrdersForResource(resource, { refresh: true });
@@ -3862,7 +3883,7 @@ export class LmMarketBot {
     const cargoSellBalance = rule ? await this.getStarbaseCargoPodBalance(rule, resource) : null;
     const relevantSellQuantity = getRelevantOrderThreshold(minSellQuantity, this.config.relevantSellOrderPct);
     const targetPrice = this.getTargetSellPrice(allOrders, minPrice, relevantSellQuantity, rule?.maxPrice);
-    const refillEnabled = rule?.refill !== false;
+    const refillEnabled = rule?.enabled !== false;
 
     this.logger.info(`${resource.name} wallet sell availability: ${walletSellBalance}`);
     if (cargoSellBalance !== null) {
@@ -4170,7 +4191,7 @@ export class LmMarketBot {
         targetPrice,
         targetQuantity,
         minSellQuantity,
-        refillEnabled: rule.refill !== false,
+        refillEnabled: rule.enabled !== false,
         quoteSymbol,
       };
     });
@@ -4713,7 +4734,12 @@ export class LmMarketBot {
 
   private async processAssetRuleGroup(group: GroupedAssetRules) {
     const asset = group.asset;
-    const rules = group.rules;
+    const disabledRules = group.rules.filter((item) => item.rule.enabled === false);
+    for (const { rule } of disabledRules) {
+      await this.cancelActiveOrderForRule(rule.asset, rule.starbase, rule.side);
+    }
+    const rules = group.rules.filter((item) => item.rule.enabled !== false);
+    if (rules.length === 0) return;
 
     let resource: ResourceConfig;
     try {

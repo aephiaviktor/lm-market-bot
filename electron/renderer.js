@@ -725,7 +725,9 @@ function normalizeAssetRuleRows(rows) {
       starbase: normalizedStarbase,
       group,
       asset: validValues.has(asset) ? asset : '',
-      refill: row?.refill === false || row?.refill === 'false' ? false : true,
+      enabled: row?.enabled !== undefined
+        ? row.enabled !== false && row.enabled !== 'false'
+        : row?.refill !== false && row?.refill !== 'false',
       minQuantity: String(row?.minQuantity ?? (isStrategyRow ? '' : legacySide === 'sell' ? legacyQuantity : '1')).trim(),
       maxQuantity: String(row?.maxQuantity ?? (isStrategyRow ? '' : legacyLimit || legacyQuantity)).trim(),
       minBuyPrice: String(row?.minBuyPrice ?? (isStrategyRow ? '' : legacySide === 'buy' ? '' : '')).trim(),
@@ -789,7 +791,7 @@ function renderAssetRuleRows() {
     const tr = createAssetRuleRowElement(index);
     const starbaseSelect = tr.querySelector('[data-field="starbase"]');
     const assetSelect = tr.querySelector('[data-field="asset"]');
-    const refillInput = tr.querySelector('[data-field="refill"]');
+    const enabledInput = tr.querySelector('[data-field="enabled"]');
     const fieldsByName = {
       minQuantity: tr.querySelector('[data-field="minQuantity"]'),
       maxQuantity: tr.querySelector('[data-field="maxQuantity"]'),
@@ -820,7 +822,7 @@ function renderAssetRuleRows() {
 
     starbaseSelect.value = starbaseOptions.includes(row.starbase) ? row.starbase : starbaseOptions[0];
     assetSelect.value = options.some((option) => option.value === row.asset) ? row.asset : '';
-    refillInput.checked = row.refill !== false;
+    enabledInput.checked = row.enabled !== false;
     const formattedIntegerFields = new Set(['minQuantity', 'maxQuantity']);
     for (const [field, input] of Object.entries(fieldsByName)) {
       input.value = formattedIntegerFields.has(field)
@@ -838,8 +840,8 @@ function renderAssetRuleRows() {
       renderAssetRuleRows();
     });
 
-    refillInput.addEventListener('change', (event) => {
-      assetRuleRows[index].refill = event.target.checked;
+    enabledInput.addEventListener('change', (event) => {
+      assetRuleRows[index].enabled = event.target.checked;
     });
 
     for (const [field, input] of Object.entries(fieldsByName)) {
@@ -1064,10 +1066,10 @@ function createAssetRuleInput(index, field, type, attributes = {}) {
 
 function createAssetRuleRowElement(index) {
   const row = document.createElement('tr');
-  const refillCell = document.createElement('td');
-  refillCell.className = 'refill-cell';
-  refillCell.appendChild(createAssetRuleInput(index, 'refill', 'checkbox'));
-  row.appendChild(refillCell);
+  const enableCell = document.createElement('td');
+  enableCell.className = 'enable-cell';
+  enableCell.appendChild(createAssetRuleInput(index, 'enabled', 'checkbox'));
+  row.appendChild(enableCell);
 
   for (const field of ['starbase', 'asset']) {
     const cell = document.createElement('td');
@@ -1659,7 +1661,7 @@ function normalizeAssetRulesForDiff(rows) {
       starbase: normalizeStarbaseValue(row?.starbase),
       group: String(row?.group ?? '').trim(),
       asset: String(row?.asset ?? '').trim(),
-      refill: row?.refill === false || row?.refill === 'false' ? '0' : '1',
+      enabled: row?.enabled === false || row?.enabled === 'false' ? '0' : '1',
       minQuantity: String(row?.minQuantity ?? '').replace(/[^\d-]/g, '').trim(),
       maxQuantity: String(row?.maxQuantity ?? '').replace(/[^\d-]/g, '').trim(),
       minBuyPrice: String(row?.minBuyPrice ?? '').trim(),
@@ -1681,13 +1683,13 @@ function getChangedAssets(previousRows, nextRows) {
   const prevMap = new Map(
     normalizeAssetRulesForDiff(previousRows).map((row) => [
       `${row.starbase}|${row.group}|${row.asset}`,
-      `${row.refill}|${row.minQuantity}|${row.maxQuantity}|${row.minBuyPrice}|${row.maxBuyPrice}|${row.minSellPrice}|${row.maxSellPrice}`,
+      `${row.enabled}|${row.minQuantity}|${row.maxQuantity}|${row.minBuyPrice}|${row.maxBuyPrice}|${row.minSellPrice}|${row.maxSellPrice}`,
     ])
   );
   const nextMap = new Map(
     normalizeAssetRulesForDiff(nextRows).map((row) => [
       `${row.starbase}|${row.group}|${row.asset}`,
-      `${row.refill}|${row.minQuantity}|${row.maxQuantity}|${row.minBuyPrice}|${row.maxBuyPrice}|${row.minSellPrice}|${row.maxSellPrice}`,
+      `${row.enabled}|${row.minQuantity}|${row.maxQuantity}|${row.minBuyPrice}|${row.maxBuyPrice}|${row.minSellPrice}|${row.maxSellPrice}`,
     ])
   );
 
@@ -2073,7 +2075,7 @@ addRuleRowBtn.addEventListener('click', () => {
     starbase: firstStarbase,
     group: activeAssetRuleGroup,
     asset: '',
-    refill: true,
+    enabled: true,
     minQuantity: '',
     maxQuantity: '',
     minBuyPrice: '',

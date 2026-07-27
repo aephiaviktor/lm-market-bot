@@ -52,12 +52,14 @@ test('settings IPC rejects unknown fields, oversized values, and oversized array
 });
 
 test('order cancellation requires an exact asset and side', () => {
-  assert.deepEqual(validateAssetAndSide({ asset: 'Iron Ore', side: 'buy' }), {
+  assert.deepEqual(validateAssetAndSide({ asset: 'Iron Ore', starbase: 'MRZ-5', side: 'buy' }), {
     asset: 'Iron Ore',
+    starbase: 'MRZ-5',
     side: 'buy',
   });
-  assert.throws(() => validateAssetAndSide({ asset: '', side: 'buy' }), /asset is required/);
-  assert.throws(() => validateAssetAndSide({ asset: 'Iron', side: 'hold' }), /side must be buy or sell/);
+  assert.throws(() => validateAssetAndSide({ asset: '', starbase: 'MRZ-5', side: 'buy' }), /asset is required/);
+  assert.throws(() => validateAssetAndSide({ asset: 'Iron', starbase: '', side: 'buy' }), /starbase is required/);
+  assert.throws(() => validateAssetAndSide({ asset: 'Iron', starbase: 'MRZ-5', side: 'hold' }), /side must be buy or sell/);
 });
 
 test('asset reruns accept only a bounded string array', () => {

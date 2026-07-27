@@ -1299,7 +1299,9 @@ function normalizeAssetRules(rows) {
       limit,
       price,
       group: String(row?.group ?? ''),
-      refill: row?.refill === false || row?.refill === 'false' ? false : true,
+      enabled: row?.enabled !== undefined
+        ? row.enabled !== false && row.enabled !== 'false'
+        : row?.refill !== false && row?.refill !== 'false',
       minQuantity: String(row?.minQuantity ?? (isStrategyRow ? '' : side === 'sell' ? quantity : '1')).replace(/[^\d-]/g, ''),
       maxQuantity: String(row?.maxQuantity ?? (isStrategyRow ? '' : limit || quantity)).replace(/[^\d-]/g, ''),
       minBuyPrice: String(row?.minBuyPrice ?? ''),
@@ -1769,7 +1771,7 @@ handleTrusted('bot:apply-running-settings', async (_event, payload) => {
 });
 
 handleTrusted('bot:cancel-order', async (_event, payload) => {
-  const { asset, side } = validateAssetAndSide(payload);
+  const { asset, starbase, side } = validateAssetAndSide(payload);
 
   if (!bot || !botRunning) {
     logger.warn(`Cancel order requested for ${asset} [${side}] but bot is not running`);
@@ -1777,7 +1779,7 @@ handleTrusted('bot:cancel-order', async (_event, payload) => {
   }
 
   try {
-    return await bot.cancelActiveOrderForRule(asset, side);
+    return await bot.cancelActiveOrderForRule(asset, starbase, side);
   } catch (err) {
     logger.error(`Cancel order failed for ${asset} [${side}]:`, err);
     return {
