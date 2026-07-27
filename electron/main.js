@@ -3,7 +3,9 @@ const path = require('path');
 const fs = require('fs/promises');
 const fsSync = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { buildWindowsTransactionalUpdateScript, compareVersions, normalizeVersion } = require('./update-policy');
 const lockfile = require('proper-lockfile');
 const {
   Connection,
@@ -336,21 +338,6 @@ async function readPackageVersion() {
   return JSON.parse(raw).version;
 }
 
-function normalizeVersion(value) {
-  return String(value || '').trim().replace(/^v/i, '');
-}
-
-function compareVersions(a, b) {
-  const left = normalizeVersion(a).split('.').map((part) => Number.parseInt(part, 10) || 0);
-  const right = normalizeVersion(b).split('.').map((part) => Number.parseInt(part, 10) || 0);
-  const length = Math.max(left.length, right.length);
-  for (let i = 0; i < length; i++) {
-    if ((left[i] || 0) > (right[i] || 0)) return 1;
-    if ((left[i] || 0) < (right[i] || 0)) return -1;
-  }
-  return 0;
-}
-
 async function fetchGithubJson(url) {
   const response = await fetch(url, {
     headers: {
@@ -429,6 +416,30 @@ async function downloadFile(url, targetPath) {
   await fs.writeFile(targetPath, buffer);
 }
 
+async function sha256File(filePath) {
+  const contents = await fs.readFile(filePath);
+  return crypto.createHash('sha256').update(contents).digest('hex');
+}
+
+async function launchWindowsTransactionalUpdater({ appRoot, stagedRoot, tempDir }) {
+  const scriptPath = path.join(tempDir, 'finish-update.ps1');
+  const script = buildWindowsTransactionalUpdateScript({
+    appRoot,
+    stagedRoot,
+    parentPid: process.pid,
+    taskName: `LM Market Bot ${_profileName}`,
+  });
+  await fs.writeFile(scriptPath, script, 'utf8');
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+    cwd: tempDir,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+}
+
 async function downloadUpdateAndRestart() {
   if (!isDedicatedProfileInstall()) {
     throw new Error(
@@ -443,37 +454,38 @@ async function downloadUpdateAndRestart() {
     return { updated: false, currentVersion, latestVersion: latest.version };
   }
 
-  if (botRunning) {
-    await stopBot();
-  }
-
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lm-market-bot-update-'));
+  const appRoot = getAppRoot();
+  const tempDir = await fs.mkdtemp(path.join(path.dirname(appRoot), '.lm-market-bot-update-'));
   const archivePath = path.join(tempDir, `${latest.branch || 'main'}.tar.gz`);
   await downloadFile(latest.tarballUrl, archivePath);
+  const archiveSha256 = await sha256File(archivePath);
   await runCommand('tar', ['-xzf', archivePath, '-C', tempDir], { cwd: tempDir });
 
   const entries = await fs.readdir(tempDir, { withFileTypes: true });
   const extracted = entries.find((entry) => entry.isDirectory() && entry.name.startsWith('lm-market-bot-'));
-  if (!extracted) {
-    throw new Error('Downloaded update archive did not contain the expected project folder.');
+  if (!extracted) throw new Error('Downloaded update archive did not contain the expected project folder.');
+
+  const stagedRoot = path.join(tempDir, extracted.name);
+  const stagedPackage = JSON.parse(await fs.readFile(path.join(stagedRoot, 'package.json'), 'utf8'));
+  if (normalizeVersion(stagedPackage.version) !== normalizeVersion(latest.version)) {
+    throw new Error(`Staged release version ${stagedPackage.version || 'unknown'} does not match ${latest.version}.`);
   }
 
-  const extractedRoot = path.join(tempDir, extracted.name);
-  await fs.cp(extractedRoot, getAppRoot(), {
-    recursive: true,
-    force: true,
-    filter: (source) => {
-      const rel = path.relative(extractedRoot, source);
-      return !rel.startsWith('.git') && !rel.startsWith('node_modules') && !rel.startsWith('analysis');
-    },
-  });
+  await runCommand('npm', ['install', '--no-audit', '--no-fund'], { cwd: stagedRoot });
+  await runCommand('npm', ['run', 'build'], { cwd: stagedRoot });
+  await fs.access(path.join(stagedRoot, 'dist'));
+  await fs.writeFile(path.join(stagedRoot, '.update-release.json'), JSON.stringify({
+    version: latest.version,
+    branch: latest.branch,
+    archiveSha256,
+    stagedAt: new Date().toISOString(),
+  }, null, 2));
 
-  await runCommand('npm', ['install'], { cwd: getAppRoot() });
-  await runCommand('npm', ['run', 'build'], { cwd: getAppRoot() });
-
-  app.relaunch();
-  app.exit(0);
-  return { updated: true, currentVersion, latestVersion: latest.version };
+  if (botRunning) await stopBot();
+  if (process.platform !== 'win32') throw new Error('Transactional in-app updates are supported only on Windows.');
+  await launchWindowsTransactionalUpdater({ appRoot, stagedRoot, tempDir });
+  setTimeout(() => app.exit(0), 750);
+  return { updated: true, currentVersion, latestVersion: latest.version, staged: true };
 }
 
 function getAephiaApiKey(config) {

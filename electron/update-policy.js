@@ -1,0 +1,65 @@
+'use strict';
+
+function normalizeVersion(value) {
+  return String(value || '').trim().replace(/^v/i, '');
+}
+
+function compareVersions(a, b) {
+  const left = normalizeVersion(a).split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const right = normalizeVersion(b).split('.').map((part) => Number.parseInt(part, 10) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    if ((left[index] || 0) > (right[index] || 0)) return 1;
+    if ((left[index] || 0) < (right[index] || 0)) return -1;
+  }
+  return 0;
+}
+
+function quotePowerShellLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function buildWindowsTransactionalUpdateScript({ appRoot, stagedRoot, parentPid, taskName }) {
+  const pid = Number.parseInt(String(parentPid), 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('A positive parent process id is required.');
+  if (!taskName) throw new Error('A scheduled task name is required.');
+
+  return [
+    '$ErrorActionPreference = "Stop"',
+    `$appRoot = ${quotePowerShellLiteral(appRoot)}`,
+    `$stagedRoot = ${quotePowerShellLiteral(stagedRoot)}`,
+    `$parentPid = ${pid}`,
+    `$taskName = ${quotePowerShellLiteral(taskName)}`,
+    '$backupRoot = $appRoot + ".rollback"',
+    '$logDir = Join-Path $env:LOCALAPPDATA "LMMarketBot\\logs"',
+    '$logFile = Join-Path $logDir "updater.log"',
+    'New-Item -ItemType Directory -Force -Path $logDir | Out-Null',
+    'function Write-UpdateLog([string]$message) { Add-Content -Path $logFile -Value ("{0:o} {1}" -f (Get-Date), $message) }',
+    'try {',
+    '  Write-UpdateLog "Waiting for LM Market Bot to exit"',
+    '  Wait-Process -Id $parentPid -ErrorAction SilentlyContinue',
+    '  if (-not (Test-Path (Join-Path $stagedRoot ".update-release.json"))) { throw "Staged release manifest is missing" }',
+    '  if (Test-Path $backupRoot) { Remove-Item -Recurse -Force $backupRoot }',
+    '  Move-Item -Path $appRoot -Destination $backupRoot',
+    '  try {',
+    '    Move-Item -Path $stagedRoot -Destination $appRoot',
+    '    $oldAnalysis = Join-Path $backupRoot "analysis"',
+    '    if (Test-Path $oldAnalysis) { Move-Item -Path $oldAnalysis -Destination (Join-Path $appRoot "analysis") }',
+    '    Write-UpdateLog "Release swap completed; starting scheduled task"',
+    '    & schtasks.exe /Run /TN $taskName *>> $logFile',
+    '    if ($LASTEXITCODE -ne 0) { throw "Scheduled task restart failed with exit code $LASTEXITCODE" }',
+    '  } catch {',
+    '    Write-UpdateLog ("New release failed; rolling back: " + $_.Exception.Message)',
+    '    if (Test-Path $appRoot) { Remove-Item -Recurse -Force $appRoot }',
+    '    Move-Item -Path $backupRoot -Destination $appRoot',
+    '    & schtasks.exe /Run /TN $taskName *>> $logFile',
+    '    throw',
+    '  }',
+    '} catch {',
+    '  Write-UpdateLog ("Update failed: " + $_.Exception.Message)',
+    '  exit 1',
+    '}',
+  ].join('\r\n');
+}
+
+module.exports = { buildWindowsTransactionalUpdateScript, compareVersions, normalizeVersion };
