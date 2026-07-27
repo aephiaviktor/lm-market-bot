@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildWindowsTransactionalUpdateScript, compareVersions, normalizeVersion } = require('../electron/update-policy');
+const { buildWindowsTransactionalUpdateScript, buildWindowsUpdaterLauncher, compareVersions, normalizeVersion } = require('../electron/update-policy');
 
 test('version policy compares normalized versions', () => {
   assert.equal(normalizeVersion(' v0.2.76 '), '0.2.76');
@@ -15,6 +15,7 @@ test('transactional updater waits, swaps, restarts, and rolls back on failure', 
     stagedRoot: 'C:\\Apps\\.stage\\release',
     parentPid: 4321,
     taskName: 'LM Market Bot MUD',
+    readyFile: 'C:\\Apps\\.stage\\helper-ready',
   });
   assert.ok(script.indexOf('Wait-Process') < script.indexOf('Move-Item -Path $appRoot'));
   assert.match(script, /\.update-release\.json/);
@@ -23,9 +24,22 @@ test('transactional updater waits, swaps, restarts, and rolls back on failure', 
   assert.match(script, /schtasks\.exe \/Run \/TN \$taskName/);
   assert.match(script, /LM Market Bot MUD/);
   assert.match(script, /MUD''s/);
+  assert.ok(script.indexOf('Set-Content -Path $readyFile') < script.indexOf('Wait-Process'));
+});
+
+test('Windows updater launcher starts PowerShell asynchronously through WScript', () => {
+  const launcher = buildWindowsUpdaterLauncher({
+    powershellPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    scriptPath: 'C:\\Apps\\stage with spaces\\finish-update.ps1',
+  });
+  assert.match(launcher, /WScript\.Shell/);
+  assert.match(launcher, /, 0, False\)/);
+  assert.match(launcher, /-File/);
+  assert.match(launcher, /stage with spaces/);
 });
 
 test('transactional updater rejects invalid process and task identity', () => {
-  assert.throws(() => buildWindowsTransactionalUpdateScript({ appRoot: 'x', stagedRoot: 'y', parentPid: 0, taskName: 'x' }), /positive/);
-  assert.throws(() => buildWindowsTransactionalUpdateScript({ appRoot: 'x', stagedRoot: 'y', parentPid: 1, taskName: '' }), /task name/);
+  assert.throws(() => buildWindowsTransactionalUpdateScript({ appRoot: 'x', stagedRoot: 'y', parentPid: 0, taskName: 'x', readyFile: 'z' }), /positive/);
+  assert.throws(() => buildWindowsTransactionalUpdateScript({ appRoot: 'x', stagedRoot: 'y', parentPid: 1, taskName: '', readyFile: 'z' }), /task name/);
+  assert.throws(() => buildWindowsTransactionalUpdateScript({ appRoot: 'x', stagedRoot: 'y', parentPid: 1, taskName: 'x', readyFile: '' }), /readiness file/);
 });

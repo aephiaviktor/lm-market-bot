@@ -5,7 +5,7 @@ const fsSync = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { buildWindowsTransactionalUpdateScript, compareVersions, normalizeVersion } = require('./update-policy');
+const { buildWindowsTransactionalUpdateScript, buildWindowsUpdaterLauncher, compareVersions, normalizeVersion } = require('./update-policy');
 const lockfile = require('proper-lockfile');
 const {
   Connection,
@@ -423,21 +423,36 @@ async function sha256File(filePath) {
 
 async function launchWindowsTransactionalUpdater({ appRoot, stagedRoot, tempDir }) {
   const scriptPath = path.join(tempDir, 'finish-update.ps1');
+  const launcherPath = path.join(tempDir, 'finish-update.vbs');
+  const readyFile = path.join(tempDir, 'helper-ready');
   const script = buildWindowsTransactionalUpdateScript({
     appRoot,
     stagedRoot,
     parentPid: process.pid,
     taskName: `LM Market Bot ${_profileName}`,
+    readyFile,
   });
   await fs.writeFile(scriptPath, script, 'utf8');
   const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+  await fs.writeFile(launcherPath, buildWindowsUpdaterLauncher({ powershellPath: powershell, scriptPath }), 'utf8');
+  const wscript = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe');
+  const child = spawn(wscript, [launcherPath], {
     cwd: tempDir,
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
   });
   child.unref();
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(readyFile);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw new Error('Windows update helper did not confirm startup; the current version is still running.');
 }
 
 async function downloadUpdateAndRestart() {

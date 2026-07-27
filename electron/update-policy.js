@@ -19,10 +19,11 @@ function quotePowerShellLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function buildWindowsTransactionalUpdateScript({ appRoot, stagedRoot, parentPid, taskName }) {
+function buildWindowsTransactionalUpdateScript({ appRoot, stagedRoot, parentPid, taskName, readyFile }) {
   const pid = Number.parseInt(String(parentPid), 10);
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('A positive parent process id is required.');
   if (!taskName) throw new Error('A scheduled task name is required.');
+  if (!readyFile) throw new Error('A readiness file is required.');
 
   return [
     '$ErrorActionPreference = "Stop"',
@@ -30,10 +31,12 @@ function buildWindowsTransactionalUpdateScript({ appRoot, stagedRoot, parentPid,
     `$stagedRoot = ${quotePowerShellLiteral(stagedRoot)}`,
     `$parentPid = ${pid}`,
     `$taskName = ${quotePowerShellLiteral(taskName)}`,
+    `$readyFile = ${quotePowerShellLiteral(readyFile)}`,
     '$backupRoot = $appRoot + ".rollback"',
     '$logDir = Join-Path $env:LOCALAPPDATA "LMMarketBot\\logs"',
     '$logFile = Join-Path $logDir "updater.log"',
     'New-Item -ItemType Directory -Force -Path $logDir | Out-Null',
+    'Set-Content -Path $readyFile -Value $PID',
     'function Write-UpdateLog([string]$message) { Add-Content -Path $logFile -Value ("{0:o} {1}" -f (Get-Date), $message) }',
     'try {',
     '  Write-UpdateLog "Waiting for LM Market Bot to exit"',
@@ -62,4 +65,14 @@ function buildWindowsTransactionalUpdateScript({ appRoot, stagedRoot, parentPid,
   ].join('\r\n');
 }
 
-module.exports = { buildWindowsTransactionalUpdateScript, compareVersions, normalizeVersion };
+function buildWindowsUpdaterLauncher({ powershellPath, scriptPath }) {
+  const quoteVbs = (value) => String(value).replace(/"/g, '""');
+  const command = `"${powershellPath}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${scriptPath}"`;
+  return [
+    'Set shell = CreateObject("WScript.Shell")',
+    `exitCode = shell.Run("${quoteVbs(command)}", 0, False)`,
+    'WScript.Quit exitCode',
+  ].join('\r\n');
+}
+
+module.exports = { buildWindowsTransactionalUpdateScript, buildWindowsUpdaterLauncher, compareVersions, normalizeVersion };
