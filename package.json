@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.79",
+  "version": "0.2.80",
   "description": "",
   "main": "electron/main.js",
   "scripts": {
@@ -16,11 +16,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@ledgerhq/hw-app-solana": "^7.10.5",
+    "@ledgerhq/hw-app-solana": "^7.10.6",
     "@ledgerhq/hw-transport-node-hid": "^6.33.5",
-    "@solana/spl-token": "^0.4.14",
+    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
-    "@staratlas/anchor": "^0.25.0",
+    "@staratlas/anchor": "^0.25.1",
     "@staratlas/cargo": "^1.1.0",
     "@staratlas/crew": "^0.7.0",
     "@staratlas/data-source": "^0.8.3",
@@ -34,7 +34,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
-    "electron": "^42.1.0",
+    "electron": "^42.7.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }
