@@ -34,6 +34,9 @@ test('updater stages development dependencies and validates the Electron runtime
   const main = require('node:fs').readFileSync(require('node:path').join(__dirname, '../electron/main.js'), 'utf8');
   assert.match(main, /\['install', '--include=dev', '--no-audit', '--no-fund'\]/);
   assert.match(main, /stagedRoot, 'node_modules', 'electron', 'dist', 'electron\.exe'/);
+  const packageJson = require('../package.json');
+  assert.match(packageJson.dependencies.electron, /^\^42\./);
+  assert.equal(packageJson.devDependencies?.electron, undefined);
 });
 
 test('Windows updater launcher starts PowerShell asynchronously through WScript', () => {

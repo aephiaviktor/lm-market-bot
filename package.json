@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.81",
+  "version": "0.2.82",
   "description": "",
   "main": "electron/main.js",
   "scripts": {
@@ -29,12 +29,12 @@
     "@staratlas/profile-faction": "^0.6.0",
     "@staratlas/sage": "^1.9.0-alpha.16",
     "bs58": "^6.0.0",
+    "electron": "^42.7.1",
     "proper-lockfile": "^4.1.2",
     "rpc_limiter": "git+https://github.com/aephiaviktor/rpc-limiter.git#main"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
-    "electron": "^42.7.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }
