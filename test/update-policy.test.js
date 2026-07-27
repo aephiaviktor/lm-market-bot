@@ -19,12 +19,21 @@ test('transactional updater waits, swaps, restarts, and rolls back on failure', 
   });
   assert.ok(script.indexOf('Wait-Process') < script.indexOf('Move-Item -Path $appRoot'));
   assert.match(script, /\.update-release\.json/);
+  assert.match(script, /node_modules\\electron\\dist\\electron\.exe/);
+  assert.match(script, /Staged Electron executable is missing/);
+  assert.ok(script.indexOf('Staged Electron executable is missing') < script.indexOf('Move-Item -Path $appRoot'));
   assert.match(script, /\.rollback/);
   assert.match(script, /Move-Item -Path \$backupRoot -Destination \$appRoot/);
   assert.match(script, /schtasks\.exe \/Run \/TN \$taskName/);
   assert.match(script, /LM Market Bot MUD/);
   assert.match(script, /MUD''s/);
   assert.ok(script.indexOf('Set-Content -Path $readyFile') < script.indexOf('Wait-Process'));
+});
+
+test('updater stages development dependencies and validates the Electron runtime', () => {
+  const main = require('node:fs').readFileSync(require('node:path').join(__dirname, '../electron/main.js'), 'utf8');
+  assert.match(main, /\['install', '--include=dev', '--no-audit', '--no-fund'\]/);
+  assert.match(main, /stagedRoot, 'node_modules', 'electron', 'dist', 'electron\.exe'/);
 });
 
 test('Windows updater launcher starts PowerShell asynchronously through WScript', () => {

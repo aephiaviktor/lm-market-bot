@@ -486,9 +486,12 @@ async function downloadUpdateAndRestart() {
     throw new Error(`Staged release version ${stagedPackage.version || 'unknown'} does not match ${latest.version}.`);
   }
 
-  await runCommand('npm', ['install', '--no-audit', '--no-fund'], { cwd: stagedRoot });
+  await runCommand('npm', ['install', '--include=dev', '--no-audit', '--no-fund'], { cwd: stagedRoot });
   await runCommand('npm', ['run', 'build'], { cwd: stagedRoot });
   await fs.access(path.join(stagedRoot, 'dist'));
+  if (process.platform === 'win32') {
+    await fs.access(path.join(stagedRoot, 'node_modules', 'electron', 'dist', 'electron.exe'));
+  }
   await fs.writeFile(path.join(stagedRoot, '.update-release.json'), JSON.stringify({
     version: latest.version,
     branch: latest.branch,
