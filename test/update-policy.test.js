@@ -22,6 +22,8 @@ test('transactional updater waits, swaps, restarts, and rolls back on failure', 
   assert.match(script, /node_modules\\electron\\dist\\electron\.exe/);
   assert.match(script, /Staged Electron executable is missing/);
   assert.ok(script.indexOf('Staged Electron executable is missing') < script.indexOf('Move-Item -Path $appRoot'));
+  assert.match(script, /AddSeconds\(30\)/);
+  assert.match(script, /Start-Sleep -Milliseconds 500/);
   assert.match(script, /\.rollback/);
   assert.match(script, /Move-Item -Path \$backupRoot -Destination \$appRoot/);
   assert.match(script, /schtasks\.exe \/Run \/TN \$taskName/);
