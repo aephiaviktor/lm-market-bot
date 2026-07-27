@@ -1,11 +1,13 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.82",
+  "version": "0.2.83",
   "description": "",
   "main": "electron/main.js",
   "scripts": {
     "test": "npm run build && node --test",
     "build": "tsc",
+    "ensure-electron-runtime": "node node_modules/electron/install.js",
+    "postinstall": "npm run ensure-electron-runtime",
     "typecheck": "tsc --noEmit",
     "start": "npm run build && node dist/index.js",
     "dev:cli": "ts-node src/index.ts",

@@ -33,10 +33,13 @@ test('transactional updater waits, swaps, restarts, and rolls back on failure', 
 test('updater stages development dependencies and validates the Electron runtime', () => {
   const main = require('node:fs').readFileSync(require('node:path').join(__dirname, '../electron/main.js'), 'utf8');
   assert.match(main, /\['install', '--include=dev', '--no-audit', '--no-fund'\]/);
+  assert.match(main, /\['run', 'ensure-electron-runtime'\]/);
   assert.match(main, /stagedRoot, 'node_modules', 'electron', 'dist', 'electron\.exe'/);
   const packageJson = require('../package.json');
   assert.match(packageJson.dependencies.electron, /^\^42\./);
   assert.equal(packageJson.devDependencies?.electron, undefined);
+  assert.equal(packageJson.scripts['ensure-electron-runtime'], 'node node_modules/electron/install.js');
+  assert.equal(packageJson.scripts.postinstall, 'npm run ensure-electron-runtime');
 });
 
 test('Windows updater launcher starts PowerShell asynchronously through WScript', () => {

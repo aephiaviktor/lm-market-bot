@@ -487,6 +487,7 @@ async function downloadUpdateAndRestart() {
   }
 
   await runCommand('npm', ['install', '--include=dev', '--no-audit', '--no-fund'], { cwd: stagedRoot });
+  await runCommand('npm', ['run', 'ensure-electron-runtime'], { cwd: stagedRoot });
   await runCommand('npm', ['run', 'build'], { cwd: stagedRoot });
   await fs.access(path.join(stagedRoot, 'dist'));
   if (process.platform === 'win32') {
