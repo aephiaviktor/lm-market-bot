@@ -176,6 +176,31 @@ class RpcRequestRateLimiter {
   penalize(waitMs: number) {
     this.nextRequestAtMs = Math.max(this.nextRequestAtMs, Date.now() + waitMs);
   }
+
+  /**
+   * Wait on the shared limiter and return the provider it picked. Returns
+   * `null` when the shared limiter is disabled.
+   */
+  async waitForProvider(
+    label: string,
+    bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared',
+    method: string = label,
+  ): Promise<{ provider: 'main' | 'fallback' } | null> {
+    if (!this.useSharedLimiter()) return null;
+    return await this.sharedLimiter.wait(bucketName, {
+      label,
+      metrics: {
+        app: this.metricsApp,
+        profile: this.metricsProfile,
+        method,
+      },
+    });
+  }
+
+  /** Expose the shared limiter so callers can report 429s back. */
+  getSharedLimiter(): RpcLimiter | null {
+    return this.useSharedLimiter() ? this.sharedLimiter : null;
+  }
 }
 
 function getErrorText(error: unknown): string {
@@ -556,32 +581,72 @@ function createFailoverConnection(
         }
         const label = `Connection.${String(prop)}()`;
         const bucketName = prop === 'sendRawTransaction' ? 'tx:shared' : 'rpc:shared';
+
+        // Provider-aware dispatch: ask the shared limiter which provider to
+        // use, dispatch to that Connection, and on 429 report it back so the
+        // failed provider goes into cooldown. When the shared limiter is
+        // disabled, default to 'main' (existing behavior).
+        const sharedLimiter = limiter.getSharedLimiter();
+        let pickedProvider: 'main' | 'fallback' = 'main';
+        if (sharedLimiter) {
+          try {
+            const pick = await limiter.waitForProvider(label, bucketName, method);
+            if (pick) pickedProvider = pick.provider;
+          } catch (waitError) {
+            logger.warn(`Shared limiter wait failed for ${label}, defaulting to main.`, waitError);
+          }
+        }
+
+        const usePickedAsPrimary = pickedProvider === 'main';
+        const pickedTarget = usePickedAsPrimary ? target : (fallback ?? target);
+        const pickedValue = usePickedAsPrimary ? primaryValue : (typeof fallbackValue === 'function' ? fallbackValue : primaryValue);
+        const otherTarget = usePickedAsPrimary ? (fallback ?? target) : target;
+        const otherValue = usePickedAsPrimary
+          ? (typeof fallbackValue === 'function' ? fallbackValue : null)
+          : primaryValue;
+        const otherLabel = usePickedAsPrimary
+          ? `fallback Connection.${String(prop)}()`
+          : `main Connection.${String(prop)}()`;
+
         try {
           const result = await callRpcWithRateLimitRetry(
             label,
-            () => primaryValue.apply(target, args),
+            () => pickedValue.apply(pickedTarget, args),
             limiter,
             logger,
             bucketName,
             method,
           );
-          countRpcMethod(method, 'network');
+          countRpcMethod(method, usePickedAsPrimary ? 'network' : 'fallback');
           writeCachedRpcValue(method, args, result);
           return result;
         } catch (error) {
-          if (!fallback || typeof fallbackValue !== 'function') {
+          if (!otherTarget || otherTarget === pickedTarget || typeof otherValue !== 'function') {
+            if (sharedLimiter && isRpcRateLimitError(error)) {
+              await sharedLimiter.recordProviderOutcome(pickedProvider, 'rate_limited').catch(() => undefined);
+            }
             throw error;
           }
-          logger.warn(`Primary RPC failed for Connection.${String(prop)}(), trying fallback RPC.`, error);
+          logger.warn(
+            `Provider ${pickedProvider} failed for ${label}, trying other provider.`,
+            error,
+          );
+          if (sharedLimiter && isRpcRateLimitError(error)) {
+            try {
+              await sharedLimiter.recordProviderOutcome(pickedProvider, 'rate_limited');
+            } catch (reportError) {
+              logger.warn(`Failed to record provider outcome for ${pickedProvider}.`, reportError);
+            }
+          }
           const result = await callRpcWithRateLimitRetry(
-            `fallback Connection.${String(prop)}()`,
-            () => fallbackValue.apply(fallback, args),
+            otherLabel,
+            () => otherValue.apply(otherTarget, args),
             limiter,
             logger,
             bucketName,
             method,
           );
-          countRpcMethod(method, 'fallback');
+          countRpcMethod(method, usePickedAsPrimary ? 'fallback' : 'network');
           writeCachedRpcValue(method, args, result);
           return result;
         }

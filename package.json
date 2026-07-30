@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.85",
+  "version": "0.2.86",
   "description": "",
   "main": "electron/main.js",
   "scripts": {
@@ -33,7 +33,7 @@
     "bs58": "^6.0.0",
     "electron": "^42.7.1",
     "proper-lockfile": "^4.1.2",
-    "rpc_limiter": "git+https://github.com/aephiaviktor/rpc-limiter.git#main"
+    "rpc_limiter": "file:../rpc-limiter"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
