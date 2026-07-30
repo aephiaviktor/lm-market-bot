@@ -1370,6 +1370,18 @@ function buildProviderUrl(p) {
 function getRpcLimiterStatus() {
   const paths = getRpcLimiterPaths();
   const state = readRpcLimiterState(paths.stateFile, Date.now());
+  // Migration: pre-multi-provider state files stored rpcBaseUrl / apiKey
+  // at the top level. Copy them into state.providers.main in memory so
+  // existing configurations keep working without re-sending settings.
+  if (!state.providers || (!state.providers.main?.rpcBaseUrl && !state.providers.fallback?.rpcBaseUrl)) {
+    const legacyBase = String(state.rpcBaseUrl || '').trim();
+    if (legacyBase) {
+      state.providers = {
+        main: { rpcBaseUrl: legacyBase, apiKey: String(state.apiKey || '').trim() },
+        fallback: {},
+      };
+    }
+  }
   const now = Date.now();
   const providers = state.providers || { main: {}, fallback: {} };
   const inCooldown = (p) => Boolean(p?.cooldownUntilMs && p.cooldownUntilMs > now);
