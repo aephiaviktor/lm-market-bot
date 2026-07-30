@@ -33,7 +33,7 @@
     "bs58": "^6.0.0",
     "electron": "^42.7.1",
     "proper-lockfile": "^4.1.2",
-    "rpc_limiter": "file:../rpc-limiter"
+    "rpc_limiter": "git+https://github.com/aephiaviktor/rpc-limiter.git#main"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
