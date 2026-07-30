@@ -1352,9 +1352,9 @@ function getRpcLimiterPaths() {
   return resolvePaths();
 }
 
-function buildSharedRpcUrl(state) {
-  const base = String(state?.rpcBaseUrl || '').trim();
-  const apiKey = String(state?.apiKey || '').trim();
+function buildProviderUrl(p) {
+  const base = String(p?.rpcBaseUrl || '').trim();
+  const apiKey = String(p?.apiKey || '').trim();
   if (!base) return '';
   if (!apiKey) return base;
   try {
@@ -1370,14 +1370,35 @@ function buildSharedRpcUrl(state) {
 function getRpcLimiterStatus() {
   const paths = getRpcLimiterPaths();
   const state = readRpcLimiterState(paths.stateFile, Date.now());
-  const currentRpcUrl = buildSharedRpcUrl(state);
+  const now = Date.now();
+  const providers = state.providers || { main: {}, fallback: {} };
+  const inCooldown = (p) => Boolean(p?.cooldownUntilMs && p.cooldownUntilMs > now);
+  const available = (p) => Boolean(p?.rpcBaseUrl) && !inCooldown(p);
+
+  const mainAvail = available(providers.main);
+  const fallbackAvail = available(providers.fallback);
+  let activeProvider = null;
+  if (mainAvail && !fallbackAvail) activeProvider = 'main';
+  else if (!mainAvail && fallbackAvail) activeProvider = 'fallback';
 
   return {
     path: paths.stateFile,
     enabled: Boolean(state.enabled),
-    rpcBaseUrl: state.rpcBaseUrl || '',
-    apiKey: state.apiKey || '',
-    currentRpcUrl,
+    providers: {
+      main: {
+        url: buildProviderUrl(providers.main),
+        cooldown: inCooldown(providers.main),
+        cooldownUntil: providers.main?.cooldownUntilMs || null,
+        failures: providers.main?.failures || 0,
+      },
+      fallback: {
+        url: buildProviderUrl(providers.fallback),
+        cooldown: inCooldown(providers.fallback),
+        cooldownUntil: providers.fallback?.cooldownUntilMs || null,
+        failures: providers.fallback?.failures || 0,
+      },
+    },
+    activeProvider,
     buckets: state.buckets || {},
     updatedBy: state.updatedBy || '',
     updatedAt: state.updatedAt || '',
@@ -1430,6 +1451,10 @@ async function withRpcLimiterLock(fn) {
 
 async function sendSettingsToRpcLimiter(config) {
   const { rpcBaseUrl, apiKey } = parseRpcUrlForLimiter(config.RPC_URL);
+  // The Main vs Fallback checkbox: unchecked (default) writes to 'main';
+  // checked writes to 'fallback'. The user assigns the URL they just
+  // pasted to one of the two provider slots.
+  const role = parseBooleanSetting(config.RPC_LIMITER_PROVIDER_ROLE) ? 'fallback' : 'main';
   const rpcRequestsPerSecond = parsePositiveRate(config.RPC_REQUESTS_PER_SECOND, 'Requests / sec');
   const txPerSecond = parsePositiveRate(config.RPC_TX_SEND_RATE_LIMIT_PER_SECOND, 'sendTransaction / sec');
   const rpcIntervalMs = Math.max(1, Math.round(1000 / rpcRequestsPerSecond));
@@ -1438,8 +1463,15 @@ async function sendSettingsToRpcLimiter(config) {
   await withRpcLimiterLock((paths) => {
     const state = readRpcLimiterState(paths.stateFile, Date.now());
     state.enabled = true;
-    state.rpcBaseUrl = rpcBaseUrl;
-    state.apiKey = apiKey;
+    state.providers = state.providers || { main: {}, fallback: {} };
+    state.providers[role] = {
+      ...(state.providers[role] || {}),
+      rpcBaseUrl,
+      apiKey,
+      // Reset health metrics on re-configuration.
+      failures: 0,
+      cooldownUntilMs: null,
+    };
     state.buckets = state.buckets || {};
     state.buckets['rpc:shared'] = {
       ...(state.buckets['rpc:shared'] || { nextSlotMs: 0 }),
@@ -1567,10 +1599,16 @@ async function getEffectiveBotInputConfig(options = {}) {
 
   if (useRpcLimiter) {
     const rpcLimiter = getRpcLimiterStatus();
-    if (!rpcLimiter.currentRpcUrl) {
-      throw new Error('Use RPC Limiter is enabled, but no Current RPC Limiter URL is configured. Send settings to RPC Limiter first.');
+    const mainUrl = rpcLimiter.providers?.main?.url;
+    const fallbackUrl = rpcLimiter.providers?.fallback?.url;
+    if (!mainUrl && !fallbackUrl) {
+      throw new Error('Use RPC Limiter is enabled, but no RPC Limiter URLs are configured. Send settings to RPC Limiter first.');
     }
-    botConfig.RPC_URL = rpcLimiter.currentRpcUrl;
+    // Main becomes the bot's primary URL, fallback becomes the per-call
+    // failover target. If only one slot is configured, the other stays unset
+    // and the bot falls back to its own (non-limiter) behaviour.
+    if (mainUrl) botConfig.RPC_URL = mainUrl;
+    if (fallbackUrl) botConfig.RPC_URL_FALLBACK = fallbackUrl;
   }
 
   return {

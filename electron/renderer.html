@@ -120,11 +120,16 @@
                   </div>
                   <section class="config-wide settings-subpanel rpc-limiter-panel">
                     <label>
-                      Current RPC Limiter URL
-                      <input class="sensitive-field" id="rpc-limiter-current-url" type="text" readonly autocomplete="off" />
+                      RPC Limiter Main URL
+                      <input class="sensitive-field" id="rpc-limiter-main-url" type="text" readonly autocomplete="off" />
+                    </label>
+                    <label>
+                      RPC Limiter Fallback URL
+                      <input class="sensitive-field" id="rpc-limiter-fallback-url" type="text" readonly autocomplete="off" />
                     </label>
                     <div class="rpc-limiter-state-row">
                       <span>State: <strong id="rpc-limiter-state-path">—</strong></span>
+                      <span class="rpc-limiter-active" id="rpc-limiter-active"></span>
                       <span class="rpc-limiter-updated" id="rpc-limiter-updated"></span>
                     </div>
                     <button id="send-rpc-limiter-btn" type="button">Send settings to RPC Limiter</button>
@@ -132,8 +137,12 @@
                   <section class="config-wide settings-subpanel rpc-send-settings-panel">
                     <div class="config-grid nested-config-grid">
                       <label class="config-wide">
-                        RPC URL
+                        Replacement RPC URL
                         <input class="sensitive-field" name="RPC_URL" type="text" autocomplete="off" />
+                      </label>
+                      <label class="checkbox-label config-wide">
+                        <input name="RPC_LIMITER_PROVIDER_ROLE" type="checkbox" value="fallback" />
+                        Send above URL to Fallback slot (unchecked = Main)
                       </label>
                       <label>
                         Requests / sec (Helius free plan is limited to 10 Requests / sec)
