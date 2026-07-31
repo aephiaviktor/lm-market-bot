@@ -150,6 +150,12 @@ let bot = null;
 let botRunning = false;
 const recentLogs = [];
 
+function emitUpdateProgress(phase, message) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('update-progress', { phase, message });
+  }
+}
+
 const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
 const AEPHIA_API_KEY_VALIDATION_BYPASS = false; // Re-enable Aephia token validation.
 const GITHUB_REPO = 'aephiaviktor/lm-market-bot';
@@ -459,8 +465,10 @@ async function downloadUpdateAndRestart() {
   const appRoot = getAppRoot();
   const tempDir = await fs.mkdtemp(path.join(path.dirname(appRoot), '.lm-market-bot-update-'));
   const archivePath = path.join(tempDir, `${latest.branch || 'main'}.tar.gz`);
+  emitUpdateProgress('downloading', `Downloading LM Market Bot v${latest.version}...`);
   await downloadFile(latest.tarballUrl, archivePath);
   const archiveSha256 = await sha256File(archivePath);
+  emitUpdateProgress('extracting', 'Extracting and validating the downloaded release...');
   await runCommand('tar', ['-xzf', archivePath, '-C', tempDir], { cwd: tempDir });
 
   const entries = await fs.readdir(tempDir, { withFileTypes: true });
@@ -473,8 +481,11 @@ async function downloadUpdateAndRestart() {
     throw new Error(`Staged release version ${stagedPackage.version || 'unknown'} does not match ${latest.version}.`);
   }
 
+  emitUpdateProgress('dependencies', 'Installing update dependencies — this can take several minutes...');
   await runCommand('npm', ['install', '--include=dev', '--no-audit', '--no-fund'], { cwd: stagedRoot });
+  emitUpdateProgress('runtime', 'Validating the Electron runtime...');
   await runCommand('npm', ['run', 'ensure-electron-runtime'], { cwd: stagedRoot });
+  emitUpdateProgress('building', 'Building and validating the updated application...');
   await runCommand('npm', ['run', 'build'], { cwd: stagedRoot });
   await fs.access(path.join(stagedRoot, 'dist'));
   if (process.platform === 'win32') {
@@ -489,6 +500,7 @@ async function downloadUpdateAndRestart() {
 
   if (botRunning) await stopBot();
   if (process.platform !== 'win32') throw new Error('Transactional in-app updates are supported only on Windows.');
+  emitUpdateProgress('restarting', 'Update staged successfully. Restarting LM Market Bot...');
   await launchWindowsTransactionalUpdater({ appRoot, stagedRoot, tempDir });
   setTimeout(() => app.exit(0), 750);
   return { updated: true, currentVersion, latestVersion: latest.version, staged: true };

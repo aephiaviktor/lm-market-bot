@@ -25,6 +25,11 @@ contextBridge.exposeInMainWorld('botApi', {
   rerunAssets: (assets) => ipcRenderer.invoke('bot:rerun-assets', assets),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   downloadUpdateAndRestart: () => ipcRenderer.invoke('updates:download-and-restart'),
+  onUpdateProgress: (handler) => {
+    const wrapped = (_event, payload) => handler(payload);
+    ipcRenderer.on('update-progress', wrapped);
+    return () => ipcRenderer.removeListener('update-progress', wrapped);
+  },
   onLog: (handler) => {
     const wrapped = (_event, payload) => handler(payload);
     ipcRenderer.on('bot-log', wrapped);

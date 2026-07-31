@@ -1558,6 +1558,14 @@ async function boot() {
     void refreshBotStatus();
   });
 
+  if (typeof window.botApi.onUpdateProgress === 'function') {
+    window.botApi.onUpdateProgress((progress) => {
+      if (typeof progress?.message === 'string' && progress.message) {
+        updateMessageEl.textContent = progress.message;
+      }
+    });
+  }
+
   await refreshBotStatus();
   startStatusPolling();
   void checkForUpdatesAndRenderButton().catch((err) => {
