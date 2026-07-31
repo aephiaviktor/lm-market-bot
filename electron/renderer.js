@@ -702,7 +702,7 @@ function readFormConfig() {
   return data;
 }
 
-function writeFormConfig(config, secureSettingsStatus = {}) {
+function writeFormConfig(config, secureSettingsStatus = {}, displayAccounts = {}) {
   assetRegistryResourceList = String(config?.RESOURCE_LIST ?? '');
   for (const key of fields) {
     const element = form.elements.namedItem(key);
@@ -720,7 +720,18 @@ function writeFormConfig(config, secureSettingsStatus = {}) {
     }
   }
   updateRpcLimiterModeTone();
-  void updateDisplayAccounts();
+  setDisplayAccounts(displayAccounts);
+}
+
+function setDisplayAccounts(displayAccounts = {}) {
+  setDisplayKey(displayManagedWallet, displayAccounts.managedWallet);
+  setDisplayKey(displayPlayerProfile, displayAccounts.managedPlayerProfile);
+  if (displayAccounts.hotWalletError) {
+    displayHotWalletAddress.textContent = 'Invalid secret';
+    displayHotWalletAddress.title = displayAccounts.hotWalletError;
+  } else {
+    setDisplayKey(displayHotWalletAddress, displayAccounts.hotWalletAddress);
+  }
 }
 
 function parseBoolean(value) {
@@ -1513,7 +1524,7 @@ async function saveAllSettings() {
     assetRules: assetRuleRows,
   };
   const result = await window.botApi.saveSettings(payload);
-  writeFormConfig(result.config || {}, result.secureSettingsStatus || {});
+  writeFormConfig(result.config || {}, result.secureSettingsStatus || {}, result.displayAccounts || {});
   renderRpcLimiterStatus(result.rpcLimiter);
   assetRuleRows = Array.isArray(result.assetRules) ? normalizeAssetRuleRows(result.assetRules) : assetRuleRows;
   return result;
@@ -1521,7 +1532,7 @@ async function saveAllSettings() {
 
 async function boot() {
   const state = await window.botApi.getSettings();
-  writeFormConfig(state.config, state.secureSettingsStatus || {});
+  writeFormConfig(state.config, state.secureSettingsStatus || {}, state.displayAccounts || {});
   renderRpcLimiterStatus(state.rpcLimiter);
   assetRuleRows = Array.isArray(state.assetRules) ? normalizeAssetRuleRows(state.assetRules) : buildDefaultAssetRuleRows();
   ensureAssetRuleRows();

@@ -8,10 +8,8 @@ const { buildWindowsTransactionalUpdateScript, buildWindowsUpdaterLauncher, comp
 const lockfile = require('proper-lockfile');
 const {
   Connection,
-  Keypair,
   PublicKey,
 } = require('@solana/web3.js');
-const bs58 = require('bs58');
 const packageJson = require('../package.json');
 const APP_VERSION = packageJson.version || 'unknown';
 
@@ -139,6 +137,10 @@ const {
   redactConfigForRenderer,
   splitSensitiveConfig,
 } = require('./secret-storage-policy');
+const {
+  getDisplayAccounts,
+  getHotWalletAddressFromSecret,
+} = require('./display-accounts');
 const {
   GM_MARKET_ASSET_REGISTRY,
   formatAssetRegistryResourceList,
@@ -295,35 +297,6 @@ function installCrashEventLogging() {
   app.on('gpu-process-crashed', (_event, killed) => {
     logCrashEvent('gpu-process-crashed', { killed });
   });
-}
-
-function decodeWalletSecret(secret) {
-  const trimmed = String(secret || '').trim();
-  if (!trimmed) {
-    throw new Error('Hot wallet secret is empty.');
-  }
-
-  if (trimmed.startsWith('[')) {
-    const parsed = JSON.parse(trimmed);
-    if (!Array.isArray(parsed)) {
-      throw new Error('Hot wallet secret JSON value must be an array.');
-    }
-    return Uint8Array.from(parsed);
-  }
-
-  const hexLike = trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed;
-  if (/^[0-9a-fA-F]+$/.test(hexLike)) {
-    if (hexLike.length % 2 !== 0) {
-      throw new Error('Hot wallet secret hex value must have an even length.');
-    }
-    return Uint8Array.from(Buffer.from(hexLike, 'hex'));
-  }
-
-  return (bs58.decode || bs58.default.decode)(trimmed);
-}
-
-function getHotWalletAddressFromSecret(secret) {
-  return Keypair.fromSecretKey(decodeWalletSecret(secret)).publicKey.toBase58();
 }
 
 async function readPackageVersion() {
@@ -1122,6 +1095,7 @@ handleTrusted('settings:get', async () => {
   return {
     config: redactConfigForRenderer(config),
     secureSettingsStatus: getSensitiveConfigStatus(config),
+    displayAccounts: getDisplayAccounts(config),
     running: botRunning,
     assetRules: normalizeAssetRules(localSettings.ASSET_RULE_ROWS ?? []),
     rpcLimiter: getRpcLimiterStatus(),
@@ -1135,6 +1109,7 @@ handleTrusted('settings:save', async (_event, payload) => {
   return {
     config: redactConfigForRenderer(config),
     secureSettingsStatus: getSensitiveConfigStatus(config),
+    displayAccounts: getDisplayAccounts(config),
     assetRules: normalizeAssetRules(saved.ASSET_RULE_ROWS),
     rpcLimiter: getRpcLimiterStatus(),
   };
