@@ -193,7 +193,6 @@
               <button id="start-btn" type="button">Start Bot</button>
               <button id="stop-btn" type="button">Stop Bot</button>
               <span class="actions-spacer"></span>
-              <button id="hardware-transfer-btn" type="button">Send Tokens</button>
               <button id="deposit-crew-btn" type="button" hidden>Deposit Crew</button>
             </div>
           </section>
@@ -326,64 +325,6 @@
         <div class="update-dialog-actions">
           <button id="deposit-crew-confirm-btn" type="button" disabled>Deposit Crew</button>
           <button id="deposit-crew-cancel-btn" type="button">Cancel</button>
-        </div>
-      </section>
-    </div>
-
-    <div class="modal-backdrop" id="hardware-transfer-modal" hidden>
-      <section class="update-dialog hardware-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="hardware-transfer-dialog-title">
-        <h2 id="hardware-transfer-dialog-title">Send Tokens</h2>
-        <div class="hardware-transfer-summary">
-          <div>
-            <span>Hot wallet</span>
-            <strong id="hardware-transfer-owner">—</strong>
-          </div>
-          <button id="hardware-transfer-refresh-btn" type="button">Refresh</button>
-        </div>
-
-        <label class="hardware-transfer-field">
-          Saved recipient
-          <select id="hardware-transfer-recipient-select"></select>
-        </label>
-
-        <label class="hardware-transfer-field">
-          Recipient
-          <input id="hardware-transfer-recipient" list="hardware-transfer-recipient-list" type="text" autocomplete="off" placeholder="Recipient wallet address" />
-          <datalist id="hardware-transfer-recipient-list"></datalist>
-        </label>
-
-        <label class="checkbox-label hardware-transfer-store-row">
-          <input id="hardware-transfer-store-recipient" type="checkbox" checked />
-          Store recipient locally
-        </label>
-
-        <label class="hardware-transfer-field" id="hardware-transfer-name-row" hidden>
-          Recipient name
-          <input id="hardware-transfer-recipient-name" type="text" autocomplete="off" placeholder="Name for local address book" />
-        </label>
-
-        <div class="hardware-transfer-table-wrap">
-          <table class="hardware-transfer-table">
-            <thead>
-              <tr>
-                <th>Material / Component</th>
-                <th>Available</th>
-                <th>Amount to send</th>
-              </tr>
-            </thead>
-            <tbody id="hardware-transfer-token-rows">
-              <tr>
-                <td colspan="3">Checking balances...</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <p class="update-message" id="hardware-transfer-message">Choose a recipient and enter one or more token amounts.</p>
-        <div class="update-dialog-actions">
-          <button id="hardware-transfer-clear-btn" type="button">Clear all</button>
-          <button id="hardware-transfer-confirm-btn" type="button" disabled>Send batch</button>
-          <button id="hardware-transfer-cancel-btn" type="button">Cancel</button>
         </div>
       </section>
     </div>

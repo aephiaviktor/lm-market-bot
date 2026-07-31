@@ -18,8 +18,6 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@ledgerhq/hw-app-solana": "^7.10.6",
-    "@ledgerhq/hw-transport-node-hid": "^6.33.5",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
     "@staratlas/anchor": "^0.25.1",

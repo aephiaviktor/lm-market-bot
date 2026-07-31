@@ -949,16 +949,14 @@ select:focus {
   flex: 1 1 auto;
 }
 
-#deposit-crew-btn,
-#hardware-transfer-btn {
+#deposit-crew-btn {
   border-color: rgba(248, 201, 76, 0.8);
   color: #fff7d0;
   background: linear-gradient(180deg, #163763 0%, #10284c 100%);
   box-shadow: inset 0 0 0 1px rgba(248, 201, 76, 0.16), 0 0 0 1px rgba(248, 201, 76, 0.08);
 }
 
-#deposit-crew-btn:hover:enabled,
-#hardware-transfer-btn:hover:enabled {
+#deposit-crew-btn:hover:enabled {
   border-color: rgba(255, 214, 96, 0.95);
   background: linear-gradient(180deg, #1a4375 0%, #13315b 100%);
   box-shadow: inset 0 0 0 1px rgba(255, 214, 96, 0.24), 0 0 0 2px rgba(248, 201, 76, 0.16);
@@ -1017,10 +1015,6 @@ button:disabled {
   padding: 20px;
 }
 
-.hardware-transfer-dialog {
-  width: min(840px, 100%);
-}
-
 .update-dialog h2 {
   margin-bottom: 14px;
 }
@@ -1060,8 +1054,7 @@ button:disabled {
   margin-bottom: 14px;
 }
 
-.deposit-crew-summary > div,
-.hardware-transfer-summary > div {
+.deposit-crew-summary > div {
   min-width: 0;
   padding: 12px;
   border: 1px solid rgba(143, 193, 255, 0.16);
@@ -1069,106 +1062,22 @@ button:disabled {
   background: rgba(4, 16, 34, 0.62);
 }
 
-.deposit-crew-summary span,
-.hardware-transfer-summary span {
+.deposit-crew-summary span {
   display: block;
   margin-bottom: 4px;
   color: #9fc8ea;
   font-size: 12px;
 }
 
-.deposit-crew-summary strong,
-.hardware-transfer-summary strong {
+.deposit-crew-summary strong {
   display: block;
   color: #f4fbff;
   font-size: 20px;
   overflow-wrap: anywhere;
 }
 
-.hardware-transfer-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 14px;
-  min-width: 0;
-}
-
-.hardware-transfer-summary button {
-  align-self: stretch;
-}
-
-.deposit-crew-field,
-.hardware-transfer-field {
+.deposit-crew-field {
   margin-top: 4px;
-}
-
-.hardware-transfer-store-row {
-  flex-direction: row;
-  align-items: center;
-  margin: 12px 0 0;
-  color: #d7ebfb;
-}
-
-.hardware-transfer-table-wrap {
-  margin-top: 12px;
-  border: 1px solid rgba(143, 193, 255, 0.16);
-  border-radius: 10px;
-  background: rgba(4, 16, 34, 0.46);
-  max-height: min(48vh, 520px);
-  overflow: auto;
-}
-
-.hardware-transfer-table {
-  width: 100%;
-  min-width: 620px;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.hardware-transfer-table th,
-.hardware-transfer-table td {
-  padding: 9px 10px;
-  border-bottom: 1px solid rgba(143, 193, 255, 0.12);
-  text-align: left;
-  vertical-align: middle;
-}
-
-.hardware-transfer-table th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: #07172a;
-  color: #9fc8ea;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.hardware-transfer-table td:first-child strong,
-.hardware-transfer-table td:first-child span {
-  display: block;
-  min-width: 0;
-}
-
-.hardware-transfer-table td:first-child span {
-  margin-top: 2px;
-  color: #7fa7c6;
-  font-size: 11px;
-}
-
-.hardware-transfer-row-amount {
-  display: grid;
-  grid-template-columns: minmax(110px, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-}
-
-.hardware-transfer-row-amount input {
-  min-width: 0;
-}
-
-.hardware-transfer-row-amount button {
-  padding-inline: 10px;
 }
 
 .update-dialog-actions {

@@ -48,7 +48,6 @@ const saveBtn = document.getElementById('save-btn');
 const startBtn = document.getElementById('start-btn');
 const stopBtn = document.getElementById('stop-btn');
 const depositCrewBtn = document.getElementById('deposit-crew-btn');
-const hardwareTransferBtn = document.getElementById('hardware-transfer-btn');
 const updateBtn = document.getElementById('update-btn');
 const updateModal = document.getElementById('update-modal');
 const updateCurrentVersionEl = document.getElementById('update-current-version');
@@ -63,20 +62,6 @@ const depositCrewCountInput = document.getElementById('deposit-crew-count');
 const depositCrewMessageEl = document.getElementById('deposit-crew-message');
 const depositCrewConfirmBtn = document.getElementById('deposit-crew-confirm-btn');
 const depositCrewCancelBtn = document.getElementById('deposit-crew-cancel-btn');
-const hardwareTransferModal = document.getElementById('hardware-transfer-modal');
-const hardwareTransferOwnerEl = document.getElementById('hardware-transfer-owner');
-const hardwareTransferRecipientSelect = document.getElementById('hardware-transfer-recipient-select');
-const hardwareTransferRecipientInput = document.getElementById('hardware-transfer-recipient');
-const hardwareTransferRecipientList = document.getElementById('hardware-transfer-recipient-list');
-const hardwareTransferRefreshBtn = document.getElementById('hardware-transfer-refresh-btn');
-const hardwareTransferTokenRows = document.getElementById('hardware-transfer-token-rows');
-const hardwareTransferStoreRecipientInput = document.getElementById('hardware-transfer-store-recipient');
-const hardwareTransferNameRow = document.getElementById('hardware-transfer-name-row');
-const hardwareTransferRecipientNameInput = document.getElementById('hardware-transfer-recipient-name');
-const hardwareTransferMessageEl = document.getElementById('hardware-transfer-message');
-const hardwareTransferConfirmBtn = document.getElementById('hardware-transfer-confirm-btn');
-const hardwareTransferClearBtn = document.getElementById('hardware-transfer-clear-btn');
-const hardwareTransferCancelBtn = document.getElementById('hardware-transfer-cancel-btn');
 const addRuleRowBtn = document.getElementById('add-rule-row-btn');
 const appVersionEl = document.getElementById('app-version');
 const toggleSensitiveBtn = document.getElementById('toggle-sensitive-btn');
@@ -128,12 +113,6 @@ let availableUpdate = null;
 let updateCheckInFlight = false;
 let updateCheckPromise = null;
 let crewDepositStatus = null;
-let hardwareTransferState = {
-  ownerWallet: '',
-  recipients: [],
-  balances: [],
-};
-
 if (appVersionEl) {
   appVersionEl.textContent = `v${APP_VERSION}`;
 }
@@ -175,228 +154,6 @@ function setUpdateModalOpen(open) {
 
 function setDepositCrewModalOpen(open) {
   depositCrewModal.hidden = !open;
-}
-
-function setHardwareTransferModalOpen(open) {
-  hardwareTransferModal.hidden = !open;
-}
-
-function getKnownRecipient(address) {
-  const value = String(address || '').trim();
-  return hardwareTransferState.recipients.find((entry) => entry.address === value) || null;
-}
-
-function isLikelySolanaAddress(value) {
-  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(value || '').trim());
-}
-
-function renderHardwareTransferRecipients() {
-  hardwareTransferRecipientList.replaceChildren();
-  hardwareTransferRecipientSelect.replaceChildren();
-
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = hardwareTransferState.recipients.length
-    ? 'Choose saved recipient'
-    : 'No saved recipients';
-  hardwareTransferRecipientSelect.appendChild(placeholder);
-
-  for (const recipient of hardwareTransferState.recipients) {
-    const option = document.createElement('option');
-    option.value = recipient.address;
-    option.label = recipient.name;
-    hardwareTransferRecipientList.appendChild(option);
-
-    const selectOption = document.createElement('option');
-    selectOption.value = recipient.address;
-    selectOption.textContent = recipient.name;
-    selectOption.title = recipient.address;
-    hardwareTransferRecipientSelect.appendChild(selectOption);
-  }
-  hardwareTransferRecipientSelect.disabled = hardwareTransferState.recipients.length === 0;
-}
-
-function renderHardwareTransferBalances() {
-  hardwareTransferTokenRows.replaceChildren();
-  const balances = hardwareTransferState.balances || [];
-  if (!balances.length) {
-    const row = document.createElement('tr');
-    const cell = document.createElement('td');
-    cell.colSpan = 3;
-    cell.textContent = 'No raw material or component balances found.';
-    row.appendChild(cell);
-    hardwareTransferTokenRows.appendChild(row);
-    renderHardwareTransferRecipientState();
-    return;
-  }
-
-  for (const entry of balances) {
-    const row = document.createElement('tr');
-    row.dataset.key = entry.key;
-
-    const nameCell = document.createElement('td');
-    const name = document.createElement('strong');
-    name.textContent = entry.name;
-    const mint = document.createElement('span');
-    mint.textContent = shortKey(entry.mint);
-    mint.title = entry.mint;
-    nameCell.appendChild(name);
-    nameCell.appendChild(mint);
-
-    const availableCell = document.createElement('td');
-    availableCell.textContent = formatDecimalWithSeparators(entry.uiAmount);
-    availableCell.title = entry.uiAmount;
-
-    const amountCell = document.createElement('td');
-    const amountWrap = document.createElement('div');
-    amountWrap.className = 'hardware-transfer-row-amount';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.inputMode = 'decimal';
-    input.autocomplete = 'off';
-    input.placeholder = '0';
-    input.dataset.key = entry.key;
-    input.dataset.available = entry.uiAmount;
-    input.addEventListener('input', () => {
-      formatDecimalInputValue(input);
-      renderHardwareTransferRecipientState();
-    });
-    const maxBtn = document.createElement('button');
-    maxBtn.type = 'button';
-    maxBtn.textContent = 'MAX';
-    maxBtn.addEventListener('click', () => {
-      input.value = formatDecimalWithSeparators(entry.uiAmount);
-      renderHardwareTransferRecipientState();
-      input.focus();
-    });
-    amountWrap.appendChild(input);
-    amountWrap.appendChild(maxBtn);
-    amountCell.appendChild(amountWrap);
-
-    row.appendChild(nameCell);
-    row.appendChild(availableCell);
-    row.appendChild(amountCell);
-    hardwareTransferTokenRows.appendChild(row);
-  }
-  renderHardwareTransferRecipientState();
-}
-
-function renderHardwareTransferRecipientState() {
-  const recipient = String(hardwareTransferRecipientInput.value || '').trim();
-  const knownRecipient = getKnownRecipient(recipient);
-  const shouldStore = Boolean(hardwareTransferStoreRecipientInput.checked && recipient && !knownRecipient);
-  const hasTransferAmount = getHardwareTransferRows().length > 0;
-  hardwareTransferNameRow.hidden = !shouldStore;
-  hardwareTransferConfirmBtn.disabled =
-    !isLikelySolanaAddress(recipient) ||
-    !hasTransferAmount ||
-    (shouldStore && !String(hardwareTransferRecipientNameInput.value || '').trim());
-}
-
-function setHardwareTransferBusy(busy) {
-  hardwareTransferConfirmBtn.disabled = busy;
-  hardwareTransferCancelBtn.disabled = busy;
-  hardwareTransferRefreshBtn.disabled = busy;
-  hardwareTransferClearBtn.disabled = busy;
-  hardwareTransferRecipientSelect.disabled = busy || hardwareTransferState.recipients.length === 0;
-  hardwareTransferRecipientInput.disabled = busy;
-  hardwareTransferStoreRecipientInput.disabled = busy;
-  hardwareTransferRecipientNameInput.disabled = busy;
-  hardwareTransferTokenRows.querySelectorAll('input, button').forEach((element) => {
-    element.disabled = busy;
-  });
-}
-
-function applyHardwareTransferState(state) {
-  hardwareTransferState = {
-    ownerWallet: state?.hotWallet || state?.ownerWallet || '',
-    recipients: Array.isArray(state?.recipients) ? state.recipients : [],
-    balances: Array.isArray(state?.balances) ? state.balances : [],
-  };
-  hardwareTransferOwnerEl.textContent = shortKey(hardwareTransferState.ownerWallet || '—');
-  hardwareTransferOwnerEl.title = hardwareTransferState.ownerWallet || '';
-  renderHardwareTransferRecipients();
-  renderHardwareTransferBalances();
-}
-
-async function refreshHardwareTransferBalances() {
-  hardwareTransferMessageEl.textContent = 'Checking hot wallet balances...';
-  hardwareTransferRefreshBtn.disabled = true;
-  try {
-    const result = await window.botApi.refreshBatchTokenTransferBalances();
-    if (!result?.ok) {
-      hardwareTransferMessageEl.textContent = result?.message || 'Balance check failed.';
-      return;
-    }
-    hardwareTransferState.balances = result.balances || [];
-    renderHardwareTransferBalances();
-    hardwareTransferMessageEl.textContent = 'Balances refreshed.';
-  } catch (err) {
-    hardwareTransferMessageEl.textContent = `Balance check failed: ${err?.message || String(err)}`;
-  } finally {
-    hardwareTransferRefreshBtn.disabled = false;
-  }
-}
-
-async function openHardwareTransferDialog() {
-  hardwareTransferRecipientInput.value = '';
-  hardwareTransferRecipientSelect.value = '';
-  hardwareTransferRecipientNameInput.value = '';
-  hardwareTransferStoreRecipientInput.checked = true;
-  hardwareTransferMessageEl.textContent = 'Checking hot wallet material balances...';
-  setHardwareTransferModalOpen(true);
-  setHardwareTransferBusy(true);
-
-  try {
-    const state = await window.botApi.getBatchTokenTransferState();
-    applyHardwareTransferState(state);
-    hardwareTransferMessageEl.textContent = state?.ok
-      ? 'Choose a recipient and enter one or more token amounts.'
-      : state?.message || 'Transfer setup is not ready.';
-  } catch (err) {
-    applyHardwareTransferState(null);
-    hardwareTransferMessageEl.textContent = `Transfer setup failed: ${err?.message || String(err)}`;
-  } finally {
-    setHardwareTransferBusy(false);
-    renderHardwareTransferRecipientState();
-  }
-}
-
-function getHardwareTransferRows() {
-  const rows = [];
-  const balancesByKey = new Map((hardwareTransferState.balances || []).map((entry) => [entry.key, entry]));
-  hardwareTransferTokenRows.querySelectorAll('input[data-key]').forEach((input) => {
-    const amount = String(input.value || '').trim();
-    if (!amount) return;
-    const key = String(input.dataset.key || '').trim();
-    const balance = balancesByKey.get(key);
-    if (!balance) return;
-    rows.push({
-      key,
-      amount,
-      name: balance.name,
-    });
-  });
-  return rows;
-}
-
-function clearHardwareTransferRows() {
-  hardwareTransferTokenRows.querySelectorAll('input[data-key]').forEach((input) => {
-    input.value = '';
-  });
-  renderHardwareTransferRecipientState();
-}
-
-function getHardwareTransferRequestPayload() {
-  return {
-    payload: {
-      recipient: String(hardwareTransferRecipientInput.value || '').trim(),
-      transfers: getHardwareTransferRows().map((row) => ({
-        key: row.key,
-        amount: row.amount,
-      })),
-    },
-  };
 }
 
 async function copyTextToClipboard(text, element) {
@@ -1891,10 +1648,6 @@ depositCrewBtn.addEventListener('click', () => {
   void openDepositCrewDialog();
 });
 
-hardwareTransferBtn.addEventListener('click', () => {
-  void openHardwareTransferDialog();
-});
-
 updateBtn.addEventListener('click', () => {
   void openUpdateDialog();
 });
@@ -1918,44 +1671,6 @@ depositCrewModal.addEventListener('click', (event) => {
     setDepositCrewModalOpen(false);
   }
 });
-
-hardwareTransferCancelBtn.addEventListener('click', () => {
-  setHardwareTransferModalOpen(false);
-});
-
-hardwareTransferModal.addEventListener('click', (event) => {
-  if (event.target === hardwareTransferModal) {
-    setHardwareTransferModalOpen(false);
-  }
-});
-
-hardwareTransferRefreshBtn.addEventListener('click', () => {
-  void refreshHardwareTransferBalances();
-});
-
-hardwareTransferClearBtn.addEventListener('click', () => {
-  clearHardwareTransferRows();
-});
-
-hardwareTransferRecipientInput.addEventListener('input', () => {
-  const knownRecipient = getKnownRecipient(hardwareTransferRecipientInput.value);
-  if (knownRecipient) {
-    hardwareTransferRecipientNameInput.value = knownRecipient.name;
-  }
-  hardwareTransferRecipientSelect.value = knownRecipient?.address || '';
-  renderHardwareTransferRecipientState();
-});
-
-hardwareTransferRecipientSelect.addEventListener('change', () => {
-  const selectedAddress = String(hardwareTransferRecipientSelect.value || '').trim();
-  const knownRecipient = getKnownRecipient(selectedAddress);
-  hardwareTransferRecipientInput.value = selectedAddress;
-  hardwareTransferRecipientNameInput.value = knownRecipient?.name || '';
-  renderHardwareTransferRecipientState();
-});
-
-hardwareTransferStoreRecipientInput.addEventListener('change', renderHardwareTransferRecipientState);
-hardwareTransferRecipientNameInput.addEventListener('input', renderHardwareTransferRecipientState);
 
 depositCrewCountInput.addEventListener('input', () => {
   renderDepositCrewStatus(crewDepositStatus);
@@ -1991,74 +1706,6 @@ depositCrewConfirmBtn.addEventListener('click', async () => {
     depositCrewConfirmBtn.disabled =
       !Boolean(crewDepositStatus?.ready) ||
       (refreshedAvailableCrew !== null && refreshedAvailableCrew <= 0);
-  }
-});
-
-hardwareTransferConfirmBtn.addEventListener('click', async () => {
-  const { payload } = getHardwareTransferRequestPayload();
-  const transferRows = getHardwareTransferRows();
-
-  const recipient = String(hardwareTransferRecipientInput.value || '').trim();
-  const knownRecipient = getKnownRecipient(recipient);
-  const shouldStoreRecipient = Boolean(hardwareTransferStoreRecipientInput.checked && recipient && !knownRecipient);
-  const previewRows = transferRows.slice(0, 12).map((row) => `- ${row.name}: ${row.amount}`);
-  const extraCount = transferRows.length - previewRows.length;
-  const confirmed = window.confirm([
-    `Send ${transferRows.length} token type${transferRows.length === 1 ? '' : 's'} to:`,
-    recipient,
-    '',
-    ...previewRows,
-    extraCount > 0 ? `- and ${extraCount} more` : '',
-    '',
-    'This will be signed and sent by the hot wallet.',
-  ].filter((line) => line !== '').join('\n'));
-  if (!confirmed) {
-    return;
-  }
-
-  setHardwareTransferBusy(true);
-  hardwareTransferMessageEl.textContent = 'Preparing the batch transfer...';
-  appendLog(`[${new Date().toISOString()}] [INFO] Hot wallet batch token transfer requested for ${transferRows.length} token row(s).`);
-
-  const stopHardwareTransferProgress = window.botApi.onBatchTokenTransferProgress?.((payload) => {
-    const message = String(payload?.message || '').trim();
-    if (message) {
-      hardwareTransferMessageEl.textContent = message;
-    }
-  });
-
-  try {
-    const result = await window.botApi.sendBatchTokenTransfer(payload);
-
-    if (!result?.ok) {
-      hardwareTransferMessageEl.textContent = result?.message || 'Transfer failed.';
-      appendLog(`[${new Date().toISOString()}] [WARN] Hot wallet batch token transfer failed: ${result?.message || 'unknown error'}`);
-      return;
-    }
-
-    if (shouldStoreRecipient) {
-      const saved = await window.botApi.saveBatchTokenTransferRecipient({
-        address: recipient,
-        name: hardwareTransferRecipientNameInput.value,
-      });
-      if (saved?.ok) {
-        hardwareTransferState.recipients = saved.recipients || [];
-        renderHardwareTransferRecipients();
-      }
-    }
-
-    hardwareTransferMessageEl.textContent = `Batch transfer sent: ${result.signature}`;
-    appendLog(`[${new Date().toISOString()}] [INFO] Hot wallet batch token transfer sent: ${result.signature}`);
-    clearHardwareTransferRows();
-    await refreshHardwareTransferBalances();
-    await refreshBotStatus();
-  } catch (err) {
-    hardwareTransferMessageEl.textContent = `Transfer failed: ${err?.message || String(err)}`;
-    appendLog(`[${new Date().toISOString()}] [ERROR] Hot wallet batch token transfer failed: ${err?.message || String(err)}`);
-  } finally {
-    stopHardwareTransferProgress?.();
-    setHardwareTransferBusy(false);
-    renderHardwareTransferRecipientState();
   }
 });
 
