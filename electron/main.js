@@ -141,6 +141,7 @@ const {
   getDisplayAccounts,
   getHotWalletAddressFromSecret,
 } = require('./display-accounts');
+const { canReuseInstalledDependencies } = require('./dependency-reuse-policy');
 const {
   GM_MARKET_ASSET_REGISTRY,
   formatAssetRegistryResourceList,
@@ -454,10 +455,29 @@ async function downloadUpdateAndRestart() {
     throw new Error(`Staged release version ${stagedPackage.version || 'unknown'} does not match ${latest.version}.`);
   }
 
-  emitUpdateProgress('dependencies', 'Installing update dependencies — this can take several minutes...');
-  await runCommand('npm', ['install', '--include=dev', '--no-audit', '--no-fund'], { cwd: stagedRoot });
-  emitUpdateProgress('runtime', 'Validating the Electron runtime...');
-  await runCommand('npm', ['run', 'ensure-electron-runtime'], { cwd: stagedRoot });
+  const currentLockfile = JSON.parse(await fs.readFile(path.join(appRoot, 'package-lock.json'), 'utf8'));
+  const stagedLockfile = JSON.parse(await fs.readFile(path.join(stagedRoot, 'package-lock.json'), 'utf8'));
+  const installedNodeModules = path.join(appRoot, 'node_modules');
+  const installedElectron = path.join(installedNodeModules, 'electron', 'dist', 'electron.exe');
+  let reuseDependencies = canReuseInstalledDependencies(currentLockfile, stagedLockfile);
+  if (reuseDependencies) {
+    try {
+      await fs.access(installedElectron);
+    } catch {
+      reuseDependencies = false;
+    }
+  }
+
+  if (reuseDependencies) {
+    emitUpdateProgress('dependencies', 'Dependencies are unchanged — reusing the installed dependency set...');
+    await fs.symlink(installedNodeModules, path.join(stagedRoot, 'node_modules'), 'junction');
+    emitUpdateProgress('runtime', 'Validating the reused Electron runtime...');
+  } else {
+    emitUpdateProgress('dependencies', 'Dependencies changed — installing the updated dependency set...');
+    await runCommand('npm', ['install', '--include=dev', '--no-audit', '--no-fund'], { cwd: stagedRoot });
+    emitUpdateProgress('runtime', 'Validating the Electron runtime...');
+    await runCommand('npm', ['run', 'ensure-electron-runtime'], { cwd: stagedRoot });
+  }
   emitUpdateProgress('building', 'Building and validating the updated application...');
   await runCommand('npm', ['run', 'build'], { cwd: stagedRoot });
   await fs.access(path.join(stagedRoot, 'dist'));
@@ -468,6 +488,7 @@ async function downloadUpdateAndRestart() {
     version: latest.version,
     branch: latest.branch,
     archiveSha256,
+    reuseDependencies,
     stagedAt: new Date().toISOString(),
   }, null, 2));
 

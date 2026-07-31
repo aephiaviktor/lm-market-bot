@@ -19,6 +19,11 @@ test('transactional updater waits, swaps, restarts, and rolls back on failure', 
   });
   assert.ok(script.indexOf('Wait-Process') < script.indexOf('Move-Item -Path $appRoot'));
   assert.match(script, /\.update-release\.json/);
+  assert.match(script, /ConvertFrom-Json/);
+  assert.match(script, /\$reuseDependencies/);
+  assert.match(script, /\[System\.IO\.Directory\]::Delete\(\$stagedNodeModules\)/);
+  assert.match(script, /Move-Item -Path \$backupNodeModules -Destination \$stagedNodeModules/);
+  assert.match(script, /Move-Item -Path \$activeNodeModules -Destination \$backupNodeModules/);
   assert.match(script, /node_modules\\electron\\dist\\electron\.exe/);
   assert.match(script, /Staged Electron executable is missing/);
   assert.ok(script.indexOf('Staged Electron executable is missing') < script.indexOf('Move-Item -Path $appRoot'));
@@ -42,6 +47,10 @@ test('updater stages development dependencies and validates the Electron runtime
   assert.equal(packageJson.devDependencies?.electron, undefined);
   assert.equal(packageJson.scripts['ensure-electron-runtime'], 'node node_modules/electron/install.js');
   assert.equal(packageJson.scripts.postinstall, 'npm run ensure-electron-runtime');
+  assert.match(main, /canReuseInstalledDependencies/);
+  assert.match(main, /fs\.symlink\(/);
+  assert.match(main, /'junction'/);
+  assert.match(main, /reuseDependencies/);
 });
 
 test('Windows updater launcher starts PowerShell asynchronously through WScript', () => {
