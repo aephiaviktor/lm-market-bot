@@ -107,6 +107,7 @@ const RPC_RATE_LIMIT_RETRY_DELAYS_MS = [20000, 60000, 180000];
 const RPC_TRANSIENT_TRANSPORT_RETRY_DELAYS_MS = [5000];
 const RPC_LIMITER_SLOW_WAIT_LOG_MS = 100;
 const RPC_LIMITER_WAIT_LOG_THROTTLE_MS = 60000;
+const RPC_LIMITER_LOCK_RETRY_DELAYS_MS = [25, 75, 150];
 const SHIP_BUY_OUTBID_PCT = 0.005;
 const SHIP_PART_SUFFIX = ' (ship parts)';
 const SHIP_START_NAME = 'Busan Pulse';
@@ -119,10 +120,27 @@ const SHIP_MINTS = new Set(
     : [],
 );
 
-class RpcRequestRateLimiter {
+type SharedLimiterWaitResult = { provider: 'main' | 'fallback' };
+type SharedLimiterLike = {
+  wait(bucketName: 'rpc:shared' | 'tx:shared', options: unknown): Promise<SharedLimiterWaitResult>;
+  recordProviderOutcome: RpcLimiter['recordProviderOutcome'];
+};
+
+export function isRpcLimiterLockContentionError(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '').toUpperCase()
+    : '';
+  const text = getErrorText(error).toLowerCase();
+  return code === 'ELOCKED' || text.includes('lock file is already being held');
+}
+
+export class RpcRequestRateLimiter {
   private queue: Promise<void> = Promise.resolve();
+  private sharedWaitQueue: Promise<void> = Promise.resolve();
   private nextRequestAtMs = 0;
-  private readonly sharedLimiter = new RpcLimiter();
+  private readonly sharedLimiter: SharedLimiterLike;
+  private readonly lockRetryDelaysMs: number[];
+  private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly lastSharedWaitLogAtMs = new Map<string, number>();
 
   constructor(
@@ -131,11 +149,41 @@ class RpcRequestRateLimiter {
     private readonly useSharedLimiter: () => boolean,
     private readonly metricsApp: string,
     private readonly metricsProfile: string = 'default',
-  ) {}
+    testOptions?: {
+      sharedLimiter?: SharedLimiterLike;
+      lockRetryDelaysMs?: number[];
+      sleepFn?: (ms: number) => Promise<void>;
+    },
+  ) {
+    this.sharedLimiter = testOptions?.sharedLimiter ?? new RpcLimiter();
+    this.lockRetryDelaysMs = testOptions?.lockRetryDelaysMs ?? RPC_LIMITER_LOCK_RETRY_DELAYS_MS;
+    this.sleepFn = testOptions?.sleepFn ?? sleep;
+  }
+
+  private async waitOnSharedLimiter(
+    bucketName: 'rpc:shared' | 'tx:shared',
+    options: unknown,
+  ): Promise<SharedLimiterWaitResult> {
+    const task = this.sharedWaitQueue.then(async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await this.sharedLimiter.wait(bucketName, options);
+        } catch (error) {
+          const retryDelayMs = this.lockRetryDelaysMs[attempt];
+          if (!isRpcLimiterLockContentionError(error) || retryDelayMs === undefined) throw error;
+          this.logger.warn(
+            `Shared limiter lock contention; retrying in ${retryDelayMs}ms (${attempt + 1}/${this.lockRetryDelaysMs.length}).`,
+          );
+          await this.sleepFn(retryDelayMs);
+        }
+      }
+    });
+    this.sharedWaitQueue = task.then(() => undefined, () => undefined);
+    return await task;
+  }
 
   async wait(label: string, bucketName: 'rpc:shared' | 'tx:shared' = 'rpc:shared', method: string = label): Promise<void> {
-    const next = this.queue.then(async () => {
-      if (this.useSharedLimiter()) {
+    if (this.useSharedLimiter()) {
         const sharedStartedAt = Date.now();
         const waitOptions = {
           label,
@@ -145,7 +193,7 @@ class RpcRequestRateLimiter {
             method,
           },
         };
-        await this.sharedLimiter.wait(bucketName, waitOptions);
+        await this.waitOnSharedLimiter(bucketName, waitOptions);
         const sharedWaitMs = Date.now() - sharedStartedAt;
         const logKey = `${bucketName}:${label}`;
         const lastLoggedAt = this.lastSharedWaitLogAtMs.get(logKey) ?? 0;
@@ -155,8 +203,9 @@ class RpcRequestRateLimiter {
           this.logger.info(`${prefix} waiting for ${label}.`);
           this.lastSharedWaitLogAtMs.set(logKey, now);
         }
-      }
+    }
 
+    const next = this.queue.then(async () => {
       const requestsPerSecond = Math.max(0.000001, this.getRequestsPerSecond());
       const waitMs = Math.max(0, this.nextRequestAtMs - Date.now());
       if (waitMs > 0) {
@@ -187,7 +236,7 @@ class RpcRequestRateLimiter {
     method: string = label,
   ): Promise<{ provider: 'main' | 'fallback' } | null> {
     if (!this.useSharedLimiter()) return null;
-    return await this.sharedLimiter.wait(bucketName, {
+    return await this.waitOnSharedLimiter(bucketName, {
       label,
       metrics: {
         app: this.metricsApp,
@@ -198,7 +247,7 @@ class RpcRequestRateLimiter {
   }
 
   /** Expose the shared limiter so callers can report 429s back. */
-  getSharedLimiter(): RpcLimiter | null {
+  getSharedLimiter(): SharedLimiterLike | null {
     return this.useSharedLimiter() ? this.sharedLimiter : null;
   }
 }

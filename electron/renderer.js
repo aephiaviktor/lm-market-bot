@@ -1564,8 +1564,9 @@ async function boot() {
   for (const entry of existingLogs || []) renderLogEntry(entry);
   window.botApi.onLog(renderLogEntry);
 
-  window.botApi.onStatus((entry) => {
-    setRunning(Boolean(entry.running));
+  window.botApi.onStatus(() => {
+    // Use the canonical status snapshot for both lifecycle controls and details.
+    // Updating controls directly here can race an in-flight snapshot render.
     void refreshBotStatus();
   });
 

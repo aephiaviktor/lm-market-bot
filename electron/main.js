@@ -5,7 +5,10 @@ const fsSync = require('fs');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { buildWindowsTransactionalUpdateScript, buildWindowsUpdaterLauncher, compareVersions, normalizeVersion } = require('./update-policy');
-const { buildStatusFailureSnapshot } = require('./status-snapshot-policy');
+const {
+  buildAuthoritativeStatusSnapshot,
+  buildStatusFailureSnapshot,
+} = require('./status-snapshot-policy');
 const lockfile = require('proper-lockfile');
 const {
   Connection,
@@ -1297,7 +1300,10 @@ handleTrusted('bot:status', async () => {
   }
 
   try {
-    const snapshot = await bot.getStatusSnapshot();
+    const snapshot = buildAuthoritativeStatusSnapshot(
+      await bot.getStatusSnapshot(),
+      botRunning,
+    );
     lastSuccessfulStatusSnapshot = snapshot;
     return snapshot;
   } catch (err) {

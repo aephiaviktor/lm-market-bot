@@ -1,6 +1,11 @@
 'use strict';
 
-const STATUS_WARNING = 'Status details temporarily unavailable; bot lifecycle is unaffected.';
+function buildAuthoritativeStatusSnapshot(snapshot, running) {
+  return {
+    ...(snapshot && typeof snapshot === 'object' ? snapshot : {}),
+    running: running === true,
+  };
+}
 
 function buildStatusFailureSnapshot(previousSnapshot, { running, version } = {}) {
   const previous = previousSnapshot && typeof previousSnapshot === 'object'
@@ -11,11 +16,10 @@ function buildStatusFailureSnapshot(previousSnapshot, { running, version } = {})
     ...previous,
     version: String(version || previous.version || 'unknown'),
     running: running === true,
-    statusWarning: STATUS_WARNING,
   };
 }
 
 module.exports = {
-  STATUS_WARNING,
+  buildAuthoritativeStatusSnapshot,
   buildStatusFailureSnapshot,
 };
