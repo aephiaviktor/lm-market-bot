@@ -5,6 +5,7 @@ const fsSync = require('fs');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { buildWindowsTransactionalUpdateScript, buildWindowsUpdaterLauncher, compareVersions, normalizeVersion } = require('./update-policy');
+const { buildStatusFailureSnapshot } = require('./status-snapshot-policy');
 const lockfile = require('proper-lockfile');
 const {
   Connection,
@@ -953,10 +954,12 @@ async function getEffectiveBotInputConfig(options = {}) {
   };
 }
 
-function getEmptyStatusSnapshot() {
+let lastSuccessfulStatusSnapshot = null;
+
+function getEmptyStatusSnapshot(running = false) {
   return {
     version: APP_VERSION,
-    running: false,
+    running,
     wallet: '—',
     solBalance: 0,
     atlasBalance: 0,
@@ -982,6 +985,7 @@ async function startBotFromSettings() {
   const configInput = await getEffectiveBotInputConfig({ requireAssetRegistry: true });
   const config = buildBotConfig(configInput);
   bot = new LmMarketBot(config, logger);
+  lastSuccessfulStatusSnapshot = null;
   botRunning = true;
   broadcast('bot-status', { running: true });
 
@@ -1003,6 +1007,7 @@ async function stopBot() {
   await bot.stop();
   botRunning = false;
   bot = null;
+  lastSuccessfulStatusSnapshot = null;
   broadcast('bot-status', { running: false });
 }
 
@@ -1287,14 +1292,20 @@ handleTrusted('crew-deposit:run', async (_event, payload) => {
 
 handleTrusted('bot:status', async () => {
   if (!bot) {
-    return getEmptyStatusSnapshot();
+    lastSuccessfulStatusSnapshot = null;
+    return getEmptyStatusSnapshot(false);
   }
 
   try {
-    return await bot.getStatusSnapshot();
+    const snapshot = await bot.getStatusSnapshot();
+    lastSuccessfulStatusSnapshot = snapshot;
+    return snapshot;
   } catch (err) {
     logger.error('Failed to fetch bot status snapshot:', err);
-    return getEmptyStatusSnapshot();
+    return buildStatusFailureSnapshot(
+      lastSuccessfulStatusSnapshot || getEmptyStatusSnapshot(botRunning),
+      { running: botRunning, version: APP_VERSION },
+    );
   }
 });
 

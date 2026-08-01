@@ -5485,6 +5485,15 @@ export class LmMarketBot {
     });
   }
 
+  private scheduleLoop(delayMs: number) {
+    this.loopTimer = setTimeout(() => {
+      void this.loop().catch((error) => {
+        this.logger.error('Unexpected loop failure; retrying in 30 seconds:', error);
+        if (this.running) this.scheduleLoop(30_000);
+      });
+    }, Math.max(0, delayMs));
+  }
+
   private async loop(): Promise<void> {
     if (!this.running) {
       return;
@@ -5527,8 +5536,6 @@ export class LmMarketBot {
 
     const elapsed = end - start;
     const delay = Math.max(0, nextDelayMs - elapsed);
-    this.loopTimer = setTimeout(() => {
-      void this.loop();
-    }, delay);
+    this.scheduleLoop(delay);
   }
 }
