@@ -10,13 +10,26 @@ function sortForComparison(value) {
   );
 }
 
+function normalizeInstalledPackage(packageRecord) {
+  if (!packageRecord || typeof packageRecord !== 'object' || Array.isArray(packageRecord)) {
+    return packageRecord;
+  }
+  // npm versions differ in whether they annotate optional native packages
+  // with `libc`. That metadata does not change the package identity, source,
+  // integrity, or dependency graph used by these Windows installations.
+  const { libc: _libc, ...materialFields } = packageRecord;
+  return materialFields;
+}
+
 function getDependencySnapshot(lockfile) {
   if (!lockfile || typeof lockfile !== 'object' || Array.isArray(lockfile?.packages)) return null;
   const packages = lockfile.packages;
   if (!packages || typeof packages !== 'object' || !packages['']) return null;
   const root = packages[''];
   const installedPackages = Object.fromEntries(
-    Object.entries(packages).filter(([packagePath]) => packagePath !== ''),
+    Object.entries(packages)
+      .filter(([packagePath]) => packagePath !== '')
+      .map(([packagePath, packageRecord]) => [packagePath, normalizeInstalledPackage(packageRecord)]),
   );
   return sortForComparison({
     dependencies: root.dependencies || {},
