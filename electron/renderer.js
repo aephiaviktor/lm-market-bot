@@ -1638,9 +1638,14 @@ saveBtn.addEventListener('click', async () => {
 sendRpcLimiterBtn.addEventListener('click', async () => {
   sendRpcLimiterBtn.disabled = true;
   try {
-    const status = await window.botApi.sendSettingsToRpcLimiter({ config: readFormConfig() });
+    const providerRole = form.elements.namedItem('RPC_LIMITER_PROVIDER_ROLE')?.checked
+      ? 'fallback'
+      : 'main';
+    const status = await window.botApi.sendSettingsToRpcLimiter({ config: readFormConfig(), providerRole });
     renderRpcLimiterStatus(status);
-    appendLog(`[${new Date().toISOString()}] [INFO] Sent settings to RPC Limiter`);
+    const roleLabel = status.operation?.role === 'fallback' ? 'Fallback' : 'Main';
+    const actionLabel = status.operation?.action === 'cleared' ? 'cleared' : 'updated';
+    appendLog(`[${new Date().toISOString()}] [INFO] RPC Limiter ${roleLabel} slot ${actionLabel}`);
   } catch (err) {
     appendLog(`[${new Date().toISOString()}] [ERROR] ${err?.message || String(err)}`);
   } finally {

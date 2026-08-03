@@ -32,6 +32,18 @@ test('settings IPC accepts bounded known config and LM asset-rule fields', () =>
   assert.deepEqual(validateSettingsPayload(payload, editableKeys), payload);
 });
 
+test('settings IPC accepts provider role only for the dedicated RPC Limiter action', () => {
+  const payload = { config: { RPC_URL: '' }, providerRole: 'fallback' };
+  assert.deepEqual(validateSettingsPayload(payload, editableKeys, {
+    allowAssetRules: false,
+    allowProviderRole: true,
+  }), payload);
+  assert.throws(
+    () => validateSettingsPayload(payload, editableKeys),
+    /Unknown settings payload field: providerRole/,
+  );
+});
+
 test('settings IPC rejects unknown fields, oversized values, and oversized arrays', () => {
   assert.throws(
     () => validateSettingsPayload({ config: { UNKNOWN: 'x' } }, editableKeys),

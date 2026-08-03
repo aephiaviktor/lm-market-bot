@@ -47,6 +47,7 @@ function validateAssetRule(row, index) {
 function validateSettingsPayload(payload, editableConfigKeys, options = {}) {
   assertPlainObject(payload, 'settings payload');
   const allowedPayloadKeys = new Set(options.allowAssetRules === false ? ['config'] : ['config', 'assetRules']);
+  if (options.allowProviderRole === true) allowedPayloadKeys.add('providerRole');
   assertKnownKeys(payload, allowedPayloadKeys, 'settings payload');
   const config = payload.config ?? {};
   assertPlainObject(config, 'config');
@@ -61,6 +62,11 @@ function validateSettingsPayload(payload, editableConfigKeys, options = {}) {
   }
 
   const validated = { config: validatedConfig };
+  if (options.allowProviderRole === true && Object.prototype.hasOwnProperty.call(payload, 'providerRole')) {
+    if (typeof payload.providerRole !== 'string') throw new TypeError('providerRole must be a string.');
+    if (payload.providerRole.length > 32) throw new RangeError('providerRole is too long.');
+    validated.providerRole = payload.providerRole;
+  }
   if (Object.prototype.hasOwnProperty.call(payload, 'assetRules')) {
     if (!Array.isArray(payload.assetRules)) throw new TypeError('assetRules must be an array.');
     if (payload.assetRules.length > MAX_ASSETS) throw new RangeError(`assetRules exceeds ${MAX_ASSETS} entries.`);

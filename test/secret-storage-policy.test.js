@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
   REDACTED_VALUE,
   getSensitiveConfigStatus,
@@ -46,4 +48,12 @@ test('empty or redacted sensitive submissions keep the previous secret', () => {
     ),
     { AEPHIA_API_KEY: '', RPC_URL: 'previous', RPC_URL_FALLBACK: '', HOT_WALLET_SECRET: 'old' },
   );
+});
+
+test('RPC Limiter updates preserve explicit slot selection and blank clearing input', () => {
+  const main = fs.readFileSync(path.join(__dirname, '../electron/main.js'), 'utf8');
+  const renderer = fs.readFileSync(path.join(__dirname, '../electron/renderer.js'), 'utf8');
+  assert.match(renderer, /sendSettingsToRpcLimiter\(\{ config: readFormConfig\(\), providerRole \}\)/);
+  assert.doesNotMatch(main, /sendSettingsToRpcLimiter\(await resolveSubmittedConfig/);
+  assert.match(main, /sendSettingsToRpcLimiter\(validated\)/);
 });

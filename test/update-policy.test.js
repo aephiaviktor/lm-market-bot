@@ -18,6 +18,12 @@ test('transactional updater waits, swaps, restarts, and rolls back on failure', 
     readyFile: 'C:\\Apps\\.stage\\helper-ready',
   });
   assert.ok(script.indexOf('Wait-Process') < script.indexOf('Move-Item -Path $appRoot'));
+  assert.match(script, /Get-ScheduledTask -TaskName \$taskName/);
+  assert.match(script, /\$taskState -eq "Ready"/);
+  assert.match(script, /Start-Sleep -Milliseconds 250/);
+  assert.match(script, /Timed out waiting for scheduled task/);
+  assert.ok(script.indexOf('Get-ScheduledTask') < script.indexOf('Move-Item -Path $appRoot'));
+  assert.ok(script.indexOf('Get-ScheduledTask') < script.indexOf('schtasks.exe /Run'));
   assert.match(script, /\.update-release\.json/);
   assert.match(script, /ConvertFrom-Json/);
   assert.match(script, /\$reuseDependencies/);
