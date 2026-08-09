@@ -1638,10 +1638,16 @@ saveBtn.addEventListener('click', async () => {
 sendRpcLimiterBtn.addEventListener('click', async () => {
   sendRpcLimiterBtn.disabled = true;
   try {
+    const config = readFormConfig();
     const providerRole = form.elements.namedItem('RPC_LIMITER_PROVIDER_ROLE')?.checked
       ? 'fallback'
       : 'main';
-    const status = await window.botApi.sendSettingsToRpcLimiter({ config: readFormConfig(), providerRole });
+    const status = await window.botApi.sendSettingsToRpcLimiter({
+      rpcUrl: config.RPC_URL,
+      rpcRequestsPerSecond: config.RPC_REQUESTS_PER_SECOND,
+      txRequestsPerSecond: config.RPC_TX_SEND_RATE_LIMIT_PER_SECOND,
+      providerRole,
+    });
     renderRpcLimiterStatus(status);
     const roleLabel = status.operation?.role === 'fallback' ? 'Fallback' : 'Main';
     const actionLabel = status.operation?.action === 'cleared' ? 'cleared' : 'updated';

@@ -133,6 +133,7 @@ const {
   validateAssetAndSide,
   validateAssetList,
   validateRedeemPayload,
+  validateRpcLimiterSettingsPayload,
   validateSettingsPayload,
 } = require('./ipc-security-policy');
 const {
@@ -770,12 +771,11 @@ async function sendSettingsToRpcLimiter(payload) {
   let operation;
   await withRpcLimiterLock((paths) => {
     const state = readRpcLimiterState(paths.stateFile, Date.now());
-    const config = payload?.config || {};
     operation = applyRpcLimiterSettings(state, {
       providerRole: payload?.providerRole,
-      rpcUrl: config.RPC_URL,
-      rpcRequestsPerSecond: config.RPC_REQUESTS_PER_SECOND,
-      txRequestsPerSecond: config.RPC_TX_SEND_RATE_LIMIT_PER_SECOND,
+      rpcUrl: payload?.rpcUrl,
+      rpcRequestsPerSecond: payload?.rpcRequestsPerSecond,
+      txRequestsPerSecond: payload?.txRequestsPerSecond,
     });
     state.updatedBy = RPC_LIMITER_UPDATED_BY;
     state.updatedAt = new Date().toISOString();
@@ -1097,10 +1097,7 @@ handleTrusted('settings:save', async (_event, payload) => {
 });
 
 handleTrusted('rpc-limiter:send-settings', async (_event, payload) => {
-  const validated = validateSettingsPayload(payload, EDITABLE_CONFIG_KEYS, {
-    allowAssetRules: false,
-    allowProviderRole: true,
-  });
+  const validated = validateRpcLimiterSettingsPayload(payload);
   return await sendSettingsToRpcLimiter(validated);
 });
 

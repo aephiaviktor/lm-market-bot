@@ -75,6 +75,22 @@ function validateSettingsPayload(payload, editableConfigKeys, options = {}) {
   return validated;
 }
 
+function validateRpcLimiterSettingsPayload(payload) {
+  assertPlainObject(payload, 'RPC limiter settings payload');
+  const allowedKeys = new Set(['rpcUrl', 'rpcRequestsPerSecond', 'txRequestsPerSecond', 'providerRole']);
+  assertKnownKeys(payload, allowedKeys, 'RPC limiter settings payload');
+  const validated = {};
+  for (const key of allowedKeys) {
+    const value = payload[key] ?? '';
+    if (typeof value !== 'string') throw new TypeError(`${key} must be a string.`);
+    if (value.length > configValueLimit(key === 'rpcUrl' ? 'RPC_URL' : key)) {
+      throw new RangeError(`${key} is too long.`);
+    }
+    validated[key] = value;
+  }
+  return validated;
+}
+
 function validateAssetAndSide(payload) {
   assertPlainObject(payload, 'cancel-order payload');
   assertKnownKeys(payload, new Set(['asset', 'starbase', 'side']), 'cancel-order');
@@ -131,5 +147,6 @@ module.exports = {
   validateAssetList,
   validateAssetsPayload,
   validateRedeemPayload,
+  validateRpcLimiterSettingsPayload,
   validateSettingsPayload,
 };
