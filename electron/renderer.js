@@ -97,6 +97,8 @@ const certificatesCountEl = document.getElementById('certificates-count');
 const certificatesListEl = document.getElementById('certificates-list');
 const recentActivityCountEl = document.getElementById('recent-activity-count');
 const recentActivityListEl = document.getElementById('recent-activity-list');
+const recentActivityFilledOnlyEl = document.getElementById('recent-activity-filled-only');
+let recentActivityItems = [];
 
 let sensitiveVisible = false;
 let assetRuleRows = [];
@@ -1252,14 +1254,19 @@ function appendActivityBadge(parent, entry) {
 }
 
 function renderRecentActivity(items) {
+  recentActivityItems = Array.isArray(items) ? items : [];
+  const filledOnly = Boolean(recentActivityFilledOnlyEl?.checked);
+  const visibleItems = filledOnly
+    ? recentActivityItems.filter((entry) => entry?.event === 'FILLED')
+    : recentActivityItems;
   recentActivityListEl.replaceChildren();
-  setListCount(recentActivityCountEl, items.length);
-  if (!items.length) {
-    appendEmptyState(recentActivityListEl, 'No recent activity');
+  setListCount(recentActivityCountEl, visibleItems.length);
+  if (!visibleItems.length) {
+    appendEmptyState(recentActivityListEl, filledOnly ? 'No filled orders' : 'No recent activity');
     return;
   }
 
-  for (const entry of items) {
+  for (const entry of visibleItems) {
     const item = document.createElement('div');
     item.className = `status-item activity-item activity-item-${getActivityTone(entry)}`;
     const top = document.createElement('div');
@@ -1292,6 +1299,8 @@ function renderRecentActivity(items) {
     recentActivityListEl.appendChild(item);
   }
 }
+
+recentActivityFilledOnlyEl?.addEventListener('change', () => renderRecentActivity(recentActivityItems));
 
 function collectAssetSignals(snapshot) {
   const signal = new Map();

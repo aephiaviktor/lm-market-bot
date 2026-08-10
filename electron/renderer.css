@@ -407,6 +407,23 @@ h3 {
   border: 1px solid rgba(129, 205, 255, 0.24);
 }
 
+.recent-activity-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 10px;
+  color: #c8dff1;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.recent-activity-filter input {
+  margin: 0;
+  accent-color: #5be9a2;
+}
+
 .badge.active {
   color: #dff7ff;
   background: rgba(20, 75, 116, 0.78);
