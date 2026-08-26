@@ -2,9 +2,9 @@ const { app, BrowserWindow, ipcMain, Menu, dialog, powerSaveBlocker, safeStorage
 const path = require('path');
 const fs = require('fs/promises');
 const fsSync = require('fs');
-const crypto = require('crypto');
-const { spawn } = require('child_process');
-const { buildWindowsTransactionalUpdateScript, buildWindowsUpdaterLauncher, compareVersions, normalizeVersion } = require('./update-policy');
+const { autoUpdater } = require('electron-updater');
+const { determineReleaseAction } = require('./release-update-policy');
+const { consumeSatisfiedUpdateRestartRequest, getPackagedInstallDirectory, writeUpdateRestartRequest } = require('./update-restart-policy');
 const { applyRpcLimiterSettings, resolveLimiterConnectionUrls } = require('./rpc-limiter-settings-policy');
 const {
   buildAuthoritativeStatusSnapshot,
@@ -52,11 +52,19 @@ function sanitizeProfileName(value) {
     .replace(/^-+|-+$/g, '');
 }
 
-const BASE_USER_DATA = path.join(process.env.HOME || process.env.USERPROFILE, '.config', 'lm-market-bot');
-const _profileName = sanitizeProfileName(getProfileName());
+function inferPackagedProfileName() {
+  if (!app.isPackaged) return '';
+  const installName = path.basename(path.dirname(process.execPath));
+  const match = /^lm-market-bot-(.+)$/i.exec(installName);
+  return match ? match[1] : '';
+}
+
+const BASE_USER_DATA = process.platform === 'win32'
+  ? path.join(app.getPath('appData'), 'lm-market-bot')
+  : path.join(process.env.HOME || app.getPath('home'), '.config', 'lm-market-bot');
+const _profileName = sanitizeProfileName(getProfileName() || inferPackagedProfileName());
 const _instanceName = _profileName;
-console.error('[LmMarketBot] profile from argv =', JSON.stringify(_profileName));
-console.error('[LmMarketBot] HOME =', JSON.stringify(process.env.HOME));
+console.error('[LmMarketBot] runtime profile =', JSON.stringify(_profileName));
 if (_profileName) {
   app.setPath('userData', path.join(BASE_USER_DATA, 'profiles', _profileName));
   app.setName(`LM Market Bot - ${_profileName}`);
@@ -104,13 +112,6 @@ function getWindowIconPath() {
   );
 }
 
-function isDedicatedProfileInstall() {
-  if (!_profileName) return true;
-  const appRootName = path.basename(getAppRoot()).toLowerCase();
-  const profileSlug = _profileName.toLowerCase();
-  return appRootName === `lm-market-bot-${profileSlug}`;
-}
-
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
 
@@ -147,7 +148,6 @@ const {
   getDisplayAccounts,
   getHotWalletAddressFromSecret,
 } = require('./display-accounts');
-const { canReuseInstalledDependencies } = require('./dependency-reuse-policy');
 const {
   GM_MARKET_ASSET_REGISTRY,
   formatAssetRegistryResourceList,
@@ -168,8 +168,7 @@ function emitUpdateProgress(phase, message) {
 const AEPHIA_TOKEN_VALIDATE_URL = 'https://api.aephia.com/token/validate';
 const AEPHIA_API_KEY_VALIDATION_BYPASS = false; // Re-enable Aephia token validation.
 const GITHUB_REPO = 'aephiaviktor/lm-market-bot';
-const GITHUB_MAIN_PACKAGE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/package.json`;
-const GITHUB_MAIN_ARCHIVE_URL = `https://github.com/${GITHUB_REPO}/archive/refs/heads/main.tar.gz`;
+const GITHUB_LATEST_RELEASE_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 const RPC_LIMITER_UPDATED_BY = 'LM Market Bot';
 console.error('[LmMarketBot] TITLE_SUFFIX =', JSON.stringify(TITLE_SUFFIX));
 console.error('[LmMarketBot] APP_USER_MODEL_ID =', JSON.stringify(APP_USER_MODEL_ID));
@@ -306,204 +305,65 @@ function installCrashEventLogging() {
   });
 }
 
-async function readPackageVersion() {
-  const raw = await fs.readFile(path.join(getAppRoot(), 'package.json'), 'utf8');
-  return JSON.parse(raw).version;
-}
-
-async function fetchGithubJson(url) {
-  const response = await fetch(url, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'lm-market-bot-updater',
-    },
+async function fetchLatestOfficialRelease() {
+  const response = await fetch(GITHUB_LATEST_RELEASE_API_URL, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'lm-market-bot-updater' },
   });
-  if (!response.ok) {
-    throw new Error(`GitHub request failed: HTTP ${response.status}`);
-  }
-  return await response.json();
-}
-
-async function getLatestGithubVersion() {
-  const remotePackage = await fetchGithubJson(`${GITHUB_MAIN_PACKAGE_URL}?t=${Date.now()}`);
-  const version = normalizeVersion(remotePackage?.version);
-
-  if (!version) {
-    throw new Error('No package version found on GitHub main.');
-  }
-
-  return {
-    version,
-    branch: 'main',
-    url: `https://github.com/${GITHUB_REPO}/tree/main`,
-    tarballUrl: GITHUB_MAIN_ARCHIVE_URL,
-  };
+  if (!response.ok) throw new Error(`GitHub Releases request failed: HTTP ${response.status}`);
+  const release = await response.json();
+  const version = String(release?.tag_name || '').trim().replace(/^v/i, '');
+  if (!version) throw new Error('The latest published GitHub Release has no version tag.');
+  return { version, url: release.html_url || `https://github.com/${GITHUB_REPO}/releases/latest` };
 }
 
 async function checkForUpdates() {
-  const currentVersion = await readPackageVersion();
-  const latest = await getLatestGithubVersion();
+  const latest = await fetchLatestOfficialRelease();
+  const decision = determineReleaseAction(APP_VERSION, latest.version);
   return {
-    currentVersion,
-    latestVersion: latest.version,
-    latestBranch: latest.branch,
-    updateAvailable: compareVersions(latest.version, currentVersion) > 0,
+    currentVersion: decision.currentVersion,
+    latestVersion: decision.latestVersion,
+    updateAvailable: decision.action !== 'none',
+    restoreOfficial: decision.action === 'restore',
     releaseUrl: latest.url,
   };
 }
 
-function runCommand(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd || getAppRoot(),
-      shell: process.platform === 'win32',
-      windowsHide: true,
-    });
-
-    let output = '';
-    child.stdout.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-    child.stderr.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve(output);
-      } else {
-        reject(new Error(`${command} ${args.join(' ')} failed with exit code ${code}: ${output.slice(-2000)}`));
-      }
-    });
-  });
-}
-
-async function downloadFile(url, targetPath) {
-  const response = await fetch(url, {
-    headers: { 'User-Agent': 'lm-market-bot-updater' },
-  });
-  if (!response.ok) {
-    throw new Error(`Download failed: HTTP ${response.status}`);
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await fs.writeFile(targetPath, buffer);
-}
-
-async function sha256File(filePath) {
-  const contents = await fs.readFile(filePath);
-  return crypto.createHash('sha256').update(contents).digest('hex');
-}
-
-async function launchWindowsTransactionalUpdater({ appRoot, stagedRoot, tempDir }) {
-  const scriptPath = path.join(tempDir, 'finish-update.ps1');
-  const launcherPath = path.join(tempDir, 'finish-update.vbs');
-  const readyFile = path.join(tempDir, 'helper-ready');
-  const script = buildWindowsTransactionalUpdateScript({
-    appRoot,
-    stagedRoot,
-    parentPid: process.pid,
-    taskName: `LM Market Bot ${_profileName}`,
-    readyFile,
-  });
-  await fs.writeFile(scriptPath, script, 'utf8');
-  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  await fs.writeFile(launcherPath, buildWindowsUpdaterLauncher({ powershellPath: powershell, scriptPath }), 'utf8');
-  const wscript = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe');
-  const child = spawn(wscript, [launcherPath], {
-    cwd: tempDir,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-  child.unref();
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    try {
-      await fs.access(readyFile);
-      return;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-  }
-  throw new Error('Windows update helper did not confirm startup; the current version is still running.');
-}
-
 async function downloadUpdateAndRestart() {
-  if (!isDedicatedProfileInstall()) {
-    throw new Error(
-      `This ${APP_DISPLAY_NAME} instance is running from the shared app folder. ` +
-        `Launch it from a dedicated folder named lm-market-bot-${_profileName} before updating.`,
-    );
+  if (!app.isPackaged) throw new Error('Release updates are available only in the packaged application.');
+  if (!_profileName) throw new Error('A runtime profile is required before applying an update.');
+  const update = await checkForUpdates();
+  if (!update.updateAvailable) return { updated: false, currentVersion: update.currentVersion, latestVersion: update.latestVersion };
+  if (botRunning) {
+    emitUpdateProgress('stopping-bot', 'Stopping the bot safely...');
+    await stopBot();
   }
-
-  const latest = await getLatestGithubVersion();
-  const currentVersion = await readPackageVersion();
-  if (compareVersions(latest.version, currentVersion) <= 0) {
-    return { updated: false, currentVersion, latestVersion: latest.version };
-  }
-
-  const appRoot = getAppRoot();
-  const tempDir = await fs.mkdtemp(path.join(path.dirname(appRoot), '.lm-market-bot-update-'));
-  const archivePath = path.join(tempDir, `${latest.branch || 'main'}.tar.gz`);
-  emitUpdateProgress('downloading', `Downloading LM Market Bot v${latest.version}...`);
-  await downloadFile(latest.tarballUrl, archivePath);
-  const archiveSha256 = await sha256File(archivePath);
-  emitUpdateProgress('extracting', 'Extracting and validating the downloaded release...');
-  await runCommand('tar', ['-xzf', archivePath, '-C', tempDir], { cwd: tempDir });
-
-  const entries = await fs.readdir(tempDir, { withFileTypes: true });
-  const extracted = entries.find((entry) => entry.isDirectory() && entry.name.startsWith('lm-market-bot-'));
-  if (!extracted) throw new Error('Downloaded update archive did not contain the expected project folder.');
-
-  const stagedRoot = path.join(tempDir, extracted.name);
-  const stagedPackage = JSON.parse(await fs.readFile(path.join(stagedRoot, 'package.json'), 'utf8'));
-  if (normalizeVersion(stagedPackage.version) !== normalizeVersion(latest.version)) {
-    throw new Error(`Staged release version ${stagedPackage.version || 'unknown'} does not match ${latest.version}.`);
-  }
-
-  const currentLockfile = JSON.parse(await fs.readFile(path.join(appRoot, 'package-lock.json'), 'utf8'));
-  const stagedLockfile = JSON.parse(await fs.readFile(path.join(stagedRoot, 'package-lock.json'), 'utf8'));
-  const installedNodeModules = path.join(appRoot, 'node_modules');
-  const installedElectron = path.join(installedNodeModules, 'electron', 'dist', 'electron.exe');
-  let reuseDependencies = canReuseInstalledDependencies(currentLockfile, stagedLockfile);
-  if (reuseDependencies) {
-    try {
-      await fs.access(installedElectron);
-    } catch {
-      reuseDependencies = false;
+  const installDirectory = getPackagedInstallDirectory(process.execPath);
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.allowPrerelease = false;
+  autoUpdater.allowDowngrade = update.restoreOfficial;
+  autoUpdater.installDirectory = installDirectory;
+  const progressHandler = (progress) => {
+    const percent = Number.isFinite(progress?.percent) ? ` (${Math.floor(progress.percent)}%)` : '';
+    emitUpdateProgress('downloading', `Downloading official LM Market Bot v${update.latestVersion}${percent}...`);
+  };
+  autoUpdater.on('download-progress', progressHandler);
+  try {
+    emitUpdateProgress('checking-release', update.restoreOfficial
+      ? `Preparing restoration to official v${update.latestVersion}...`
+      : `Preparing update to official v${update.latestVersion}...`);
+    const result = await autoUpdater.checkForUpdates();
+    if (!result?.updateInfo || result.updateInfo.version !== update.latestVersion) {
+      throw new Error(`Official Release v${update.latestVersion} could not be selected by the packaged updater.`);
     }
+    await autoUpdater.downloadUpdate();
+    writeUpdateRestartRequest({ runtimeDir: app.getPath('userData'), targetVersion: update.latestVersion, installDirectory });
+    emitUpdateProgress('restarting', `Official LM Market Bot v${update.latestVersion} downloaded. Restarting...`);
+    setTimeout(() => autoUpdater.quitAndInstall(true, true), 500);
+    return { updated: true, currentVersion: update.currentVersion, latestVersion: update.latestVersion, restoredOfficial: update.restoreOfficial };
+  } finally {
+    autoUpdater.off('download-progress', progressHandler);
   }
-
-  if (reuseDependencies) {
-    emitUpdateProgress('dependencies', 'Dependencies are unchanged — reusing the installed dependency set...');
-    await fs.symlink(installedNodeModules, path.join(stagedRoot, 'node_modules'), 'junction');
-    emitUpdateProgress('runtime', 'Validating the reused Electron runtime...');
-  } else {
-    emitUpdateProgress('dependencies', 'Dependencies changed — installing the updated dependency set...');
-    await runCommand('npm', ['install', '--include=dev', '--no-audit', '--no-fund'], { cwd: stagedRoot });
-    emitUpdateProgress('runtime', 'Validating the Electron runtime...');
-    await runCommand('npm', ['run', 'ensure-electron-runtime'], { cwd: stagedRoot });
-  }
-  emitUpdateProgress('building', 'Building and validating the updated application...');
-  await runCommand('npm', ['run', 'build'], { cwd: stagedRoot });
-  await fs.access(path.join(stagedRoot, 'dist'));
-  if (process.platform === 'win32') {
-    await fs.access(path.join(stagedRoot, 'node_modules', 'electron', 'dist', 'electron.exe'));
-  }
-  await fs.writeFile(path.join(stagedRoot, '.update-release.json'), JSON.stringify({
-    version: latest.version,
-    branch: latest.branch,
-    archiveSha256,
-    reuseDependencies,
-    stagedAt: new Date().toISOString(),
-  }, null, 2));
-
-  if (botRunning) await stopBot();
-  if (process.platform !== 'win32') throw new Error('Transactional in-app updates are supported only on Windows.');
-  emitUpdateProgress('restarting', 'Update staged successfully. Restarting LM Market Bot...');
-  await launchWindowsTransactionalUpdater({ appRoot, stagedRoot, tempDir });
-  setTimeout(() => app.exit(0), 750);
-  return { updated: true, currentVersion, latestVersion: latest.version, staged: true };
 }
 
 function getAephiaApiKey(config) {
@@ -1275,6 +1135,10 @@ handleTrusted('updates:download-and-restart', async () => {
 });
 
 app.whenReady().then(async () => {
+  if (app.isPackaged) {
+    consumeSatisfiedUpdateRestartRequest({ runtimeDir: app.getPath('userData'), currentVersion: APP_VERSION, installDirectory: getPackagedInstallDirectory(process.execPath) });
+  }
+
   const powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension')
   console.log(`[LM] prevent-app-suspension blocker=${powerSaveBlockerId} active=${powerSaveBlocker.isStarted(powerSaveBlockerId)}`)
 

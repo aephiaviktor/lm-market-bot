@@ -1,7 +1,7 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.96",
-  "description": "",
+  "version": "0.2.97",
+  "description": "Faction-neutral packaged desktop automation for Star Atlas local-market trading.",
   "main": "electron/main.js",
   "scripts": {
     "test": "npm run build && node --test",
@@ -12,10 +12,11 @@
     "start": "npm run build && node dist/index.js",
     "dev:cli": "ts-node src/index.ts",
     "start:electron": "npm run build && electron .",
-    "dev": "npm run start:electron"
+    "dev": "npm run start:electron",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never"
   },
   "keywords": [],
-  "author": "",
+  "author": "Aephia",
   "license": "ISC",
   "dependencies": {
     "@solana/spl-token": "^0.4.15",
@@ -29,13 +30,58 @@
     "@staratlas/profile-faction": "^0.6.0",
     "@staratlas/sage": "^1.9.0-alpha.16",
     "bs58": "^6.0.0",
-    "electron": "^42.7.1",
+    "electron-updater": "^6.8.9",
     "proper-lockfile": "^4.1.2",
-    "rpc_limiter": "git+https://github.com/aephiaviktor/rpc-limiter.git#main"
+    "rpc_limiter": "git+https://github.com/aephiaviktor/rpc-limiter.git#main",
+    "semver": "^7.8.5"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
+    "electron": "^42.7.1",
+    "electron-builder": "^26.15.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
+  },
+  "private": true,
+  "build": {
+    "appId": "com.aephia.lm-market-bot",
+    "productName": "LM Market Bot",
+    "artifactName": "LM-Market-Bot-Setup-${version}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/**/*",
+      "package.json",
+      "!electron/update-policy.js"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "electron/assets/market_bot_icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "aephiaviktor",
+        "repo": "lm-market-bot",
+        "releaseType": "draft"
+      }
+    ]
   }
 }
