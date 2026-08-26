@@ -10,7 +10,11 @@ test('LM Market Bot uses packaged GitHub Release updates rather than main-branch
   assert.match(main, /releases\/latest/);
   assert.match(main, /autoUpdater\.checkForUpdates\(\)/);
   assert.match(main, /autoUpdater\.downloadUpdate\(\)/);
-  assert.match(main, /autoUpdater\.quitAndInstall\(true, true\)/);
+  assert.match(main, /autoUpdater\.quitAndInstall\(true, false\)/);
+  assert.match(main, /buildSharedUpdateRequest/);
+  assert.match(main, /listRuntimeRegistrations/);
+  assert.match(main, /acknowledgeSharedUpdate/);
+  assert.match(main, /buildWindowsProfileRestartScript/);
   assert.doesNotMatch(main, /raw\.githubusercontent\.com/);
   assert.doesNotMatch(main, /archive\/refs\/heads\/main\.tar\.gz/);
 });
@@ -35,11 +39,12 @@ test('one neutral Windows package serves every runtime profile', () => {
   assert.doesNotMatch(workflow, /MUD|ONI|USTUR/i);
 });
 
-test('packaged profiles use isolated persistent data and generic folder-derived identity', () => {
+test('packaged profiles share one installation while keeping persistent data isolated', () => {
   const main = fs.readFileSync(path.join(root, 'electron/main.js'), 'utf8');
   assert.match(main, /path\.join\(app\.getPath\('appData'\), 'lm-market-bot'\)/);
   assert.match(main, /profiles', _profileName/);
   assert.match(main, /inferPackagedProfileName/);
-  assert.match(main, /lm-market-bot-/);
+  assert.match(main, /registerRuntime\(BASE_USER_DATA/);
+  assert.match(main, /startSharedUpdateMonitor/);
   assert.doesNotMatch(main, /Release updates are available.*MUD|Release updates are available.*ONI|Release updates are available.*USTUR/);
 });

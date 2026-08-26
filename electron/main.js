@@ -2,9 +2,22 @@ const { app, BrowserWindow, ipcMain, Menu, dialog, powerSaveBlocker, safeStorage
 const path = require('path');
 const fs = require('fs/promises');
 const fsSync = require('fs');
+const { spawn } = require('node:child_process');
 const { autoUpdater } = require('electron-updater');
 const { determineReleaseAction } = require('./release-update-policy');
 const { consumeSatisfiedUpdateRestartRequest, getPackagedInstallDirectory, writeUpdateRestartRequest } = require('./update-restart-policy');
+const {
+  acknowledgeSharedUpdate,
+  buildSharedUpdateRequest,
+  buildWindowsProfileRestartScript,
+  getSharedUpdateRequestPath,
+  listPendingProfiles,
+  listRuntimeRegistrations,
+  readSharedUpdateAcknowledgements,
+  readSharedUpdateRequest,
+  registerRuntime,
+  writeSharedUpdateRequest,
+} = require('./shared-update-policy');
 const { applyRpcLimiterSettings, resolveLimiterConnectionUrls } = require('./rpc-limiter-settings-policy');
 const {
   buildAuthoritativeStatusSnapshot,
@@ -157,6 +170,8 @@ const {
 let mainWindow = null;
 let bot = null;
 let botRunning = false;
+let sharedUpdateQuiescing = false;
+let sharedUpdateMonitor = null;
 const recentLogs = [];
 
 function emitUpdateProgress(phase, message) {
@@ -328,21 +343,83 @@ async function checkForUpdates() {
   };
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function quiesceForSharedUpdate(request) {
+  if (sharedUpdateQuiescing || request?.targetVersion === APP_VERSION || request?.initiatorProfile === _profileName) return;
+  const participant = request?.participants?.find((entry) => entry.profile === _profileName && Number(entry.pid) === process.pid);
+  if (!participant) return;
+  sharedUpdateQuiescing = true;
+  emitUpdateProgress('stopping-bot', `Another profile is installing LM Market Bot v${request.targetVersion}. Stopping safely...`);
+  if (botRunning) await stopBot();
+  acknowledgeSharedUpdate(BASE_USER_DATA, _profileName, process.pid);
+  app.exit(0);
+}
+
+function startSharedUpdateMonitor() {
+  if (!app.isPackaged || !_profileName || sharedUpdateMonitor) return;
+  registerRuntime(BASE_USER_DATA, _profileName, process.pid, process.execPath);
+  sharedUpdateMonitor = setInterval(() => {
+    const request = readSharedUpdateRequest(BASE_USER_DATA);
+    if (request) quiesceForSharedUpdate(request).catch((error) => logCrashEvent('shared-update-quiesce-failed', error));
+  }, 500);
+  sharedUpdateMonitor.unref();
+}
+
+async function waitForOtherProfilesToQuiesce(request, timeoutMs = 60000) {
+  const otherProfiles = request.participants.filter((entry) => entry.profile !== _profileName);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pending = listPendingProfiles({ ...request, participants: otherProfiles }, readSharedUpdateAcknowledgements(BASE_USER_DATA));
+    if (!pending.length) return;
+    await sleep(250);
+  }
+  const pending = listPendingProfiles({ ...request, participants: otherProfiles }, readSharedUpdateAcknowledgements(BASE_USER_DATA));
+  throw new Error(`Timed out waiting for runtime profiles to stop safely: ${pending.join(', ')}`);
+}
+
+function restartScheduledProfileTasks(profiles) {
+  if (process.platform !== 'win32') return;
+  for (const profile of profiles) {
+    const child = spawn('schtasks.exe', ['/Run', '/TN', `LM Market Bot ${profile}`], {
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+  }
+}
+
+function launchPostInstallProfileRestart(request) {
+  if (process.platform !== 'win32') return;
+  const helperPath = path.join(BASE_USER_DATA, 'restart-profiles-after-update.ps1');
+  fsSync.mkdirSync(path.dirname(helperPath), { recursive: true });
+  fsSync.writeFileSync(helperPath, buildWindowsProfileRestartScript({
+    parentPid: process.pid,
+    executablePath: process.execPath,
+    targetVersion: request.targetVersion,
+    profiles: request.participants.map((entry) => entry.profile),
+  }), 'utf8');
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helperPath], {
+    detached: true,
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
 async function downloadUpdateAndRestart() {
   if (!app.isPackaged) throw new Error('Release updates are available only in the packaged application.');
   if (!_profileName) throw new Error('A runtime profile is required before applying an update.');
   const update = await checkForUpdates();
   if (!update.updateAvailable) return { updated: false, currentVersion: update.currentVersion, latestVersion: update.latestVersion };
-  if (botRunning) {
-    emitUpdateProgress('stopping-bot', 'Stopping the bot safely...');
-    await stopBot();
-  }
   const installDirectory = getPackagedInstallDirectory(process.execPath);
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowPrerelease = false;
   autoUpdater.allowDowngrade = update.restoreOfficial;
-  autoUpdater.installDirectory = installDirectory;
   const progressHandler = (progress) => {
     const percent = Number.isFinite(progress?.percent) ? ` (${Math.floor(progress.percent)}%)` : '';
     emitUpdateProgress('downloading', `Downloading official LM Market Bot v${update.latestVersion}${percent}...`);
@@ -357,9 +434,32 @@ async function downloadUpdateAndRestart() {
       throw new Error(`Official Release v${update.latestVersion} could not be selected by the packaged updater.`);
     }
     await autoUpdater.downloadUpdate();
+    const registrations = listRuntimeRegistrations(BASE_USER_DATA);
+    if (!registrations.some((entry) => entry.profile === _profileName && entry.pid === process.pid)) {
+      registrations.push({ profile: _profileName, pid: process.pid });
+    }
+    const request = buildSharedUpdateRequest({
+      targetVersion: update.latestVersion,
+      installDirectory,
+      initiatorProfile: _profileName,
+      participants: registrations,
+    });
+    writeSharedUpdateRequest(BASE_USER_DATA, request);
+    emitUpdateProgress('stopping-bot', 'Stopping all active LM Market Bot profiles safely...');
+    try {
+      await waitForOtherProfilesToQuiesce(request);
+    } catch (error) {
+      fsSync.rmSync(getSharedUpdateRequestPath(BASE_USER_DATA), { force: true });
+      restartScheduledProfileTasks(request.participants.map((entry) => entry.profile));
+      throw error;
+    }
+    sharedUpdateQuiescing = true;
+    if (botRunning) await stopBot();
+    acknowledgeSharedUpdate(BASE_USER_DATA, _profileName, process.pid);
     writeUpdateRestartRequest({ runtimeDir: app.getPath('userData'), targetVersion: update.latestVersion, installDirectory });
-    emitUpdateProgress('restarting', `Official LM Market Bot v${update.latestVersion} downloaded. Restarting...`);
-    setTimeout(() => autoUpdater.quitAndInstall(true, true), 500);
+    launchPostInstallProfileRestart(request);
+    emitUpdateProgress('restarting', `Official LM Market Bot v${update.latestVersion} downloaded. Updating the shared installation...`);
+    setTimeout(() => autoUpdater.quitAndInstall(true, false), 500);
     return { updated: true, currentVersion: update.currentVersion, latestVersion: update.latestVersion, restoredOfficial: update.restoreOfficial };
   } finally {
     autoUpdater.off('download-progress', progressHandler);
@@ -1137,6 +1237,7 @@ handleTrusted('updates:download-and-restart', async () => {
 app.whenReady().then(async () => {
   if (app.isPackaged) {
     consumeSatisfiedUpdateRestartRequest({ runtimeDir: app.getPath('userData'), currentVersion: APP_VERSION, installDirectory: getPackagedInstallDirectory(process.execPath) });
+    startSharedUpdateMonitor();
   }
 
   const powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension')
