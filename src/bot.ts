@@ -40,6 +40,7 @@ import {
 import { CREW_IDL, CrewConfig, type CrewIDLProgram } from '@staratlas/crew';
 import { PLAYER_PROFILE_IDL, PlayerProfile, type PlayerProfileIDLProgram } from '@staratlas/player-profile';
 import { RpcLimiter } from 'rpc_limiter';
+import { createLimiterMetricsShutdown, LIMITER_METRICS_SHUTDOWN_MAX_MS, type LimiterMetricsShutdown } from './limiter-metrics-shutdown';
 import bs58 from 'bs58';
 import fs from 'fs/promises';
 import path from 'path';
@@ -124,6 +125,13 @@ type SharedLimiterWaitResult = { provider: 'main' | 'fallback' };
 type SharedLimiterLike = {
   wait(bucketName: 'rpc:shared' | 'tx:shared', options: unknown): Promise<SharedLimiterWaitResult>;
   recordProviderOutcome: RpcLimiter['recordProviderOutcome'];
+  flushMetrics?: (deadlineAtMs: number) => Promise<boolean>;
+  closeMetrics?: (deadlineAtMs: number) => Promise<void>;
+};
+
+const CLOSE_SHARED_LIMITER_METRICS = Symbol('closeSharedLimiterMetrics');
+type ConnectionWithLimiterClose = Connection & {
+  [CLOSE_SHARED_LIMITER_METRICS]?: (deadlineAtMs: number) => Promise<void>;
 };
 
 export function isRpcLimiterLockContentionError(error: unknown): boolean {
@@ -142,6 +150,7 @@ export class RpcRequestRateLimiter {
   private readonly lockRetryDelaysMs: number[];
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly lastSharedWaitLogAtMs = new Map<string, number>();
+  private readonly limiterMetricsShutdown: LimiterMetricsShutdown;
 
   constructor(
     private readonly getRequestsPerSecond: () => number,
@@ -158,6 +167,7 @@ export class RpcRequestRateLimiter {
     this.sharedLimiter = testOptions?.sharedLimiter ?? new RpcLimiter();
     this.lockRetryDelaysMs = testOptions?.lockRetryDelaysMs ?? RPC_LIMITER_LOCK_RETRY_DELAYS_MS;
     this.sleepFn = testOptions?.sleepFn ?? sleep;
+    this.limiterMetricsShutdown = createLimiterMetricsShutdown(this.logger);
   }
 
   private async waitOnSharedLimiter(
@@ -250,6 +260,15 @@ export class RpcRequestRateLimiter {
   getSharedLimiter(): SharedLimiterLike | null {
     return this.useSharedLimiter() ? this.sharedLimiter : null;
   }
+
+  /**
+   * Idempotently close the shared limiter's metrics worker within
+   * `deadlineAtMs`. Never rejects and never delays longer than the deadline.
+   * Repeated calls return the same in-flight shutdown.
+   */
+  closeSharedLimiterMetrics(deadlineAtMs: number): Promise<void> {
+    return this.limiterMetricsShutdown.close(this.sharedLimiter, deadlineAtMs);
+  }
 }
 
 function getErrorText(error: unknown): string {
@@ -271,6 +290,16 @@ function getErrorText(error: unknown): string {
 function isRpcRateLimitError(error: unknown): boolean {
   const text = getErrorText(error).toLowerCase();
   return text.includes('429') || text.includes('too many requests') || text.includes('rate limit');
+}
+
+function isRpcQuotaExhaustedError(error: unknown): boolean {
+  return getErrorText(error).toLowerCase().includes('max usage reached');
+}
+
+function getRpcProviderOutcome(error: unknown): 'rate_limited' | 'quota_exhausted' | null {
+  if (isRpcQuotaExhaustedError(error)) return 'quota_exhausted';
+  if (isRpcRateLimitError(error)) return 'rate_limited';
+  return null;
 }
 
 function isTransientRpcTransportError(error: unknown): boolean {
@@ -611,6 +640,9 @@ function createFailoverConnection(
 
   return new Proxy(primary, {
     get(target, prop, receiver) {
+      if (prop === CLOSE_SHARED_LIMITER_METRICS) {
+        return (deadlineAtMs: number) => limiter.closeSharedLimiterMetrics(deadlineAtMs);
+      }
       const primaryValue = Reflect.get(target, prop, receiver);
       if (typeof primaryValue !== 'function') {
         return primaryValue;
@@ -671,8 +703,9 @@ function createFailoverConnection(
           return result;
         } catch (error) {
           if (!otherTarget || otherTarget === pickedTarget || typeof otherValue !== 'function') {
-            if (sharedLimiter && isRpcRateLimitError(error)) {
-              await sharedLimiter.recordProviderOutcome(pickedProvider, 'rate_limited').catch(() => undefined);
+            const providerOutcome = getRpcProviderOutcome(error);
+            if (sharedLimiter && providerOutcome) {
+              await sharedLimiter.recordProviderOutcome(pickedProvider, providerOutcome as 'rate_limited').catch(() => undefined);
             }
             throw error;
           }
@@ -680,9 +713,10 @@ function createFailoverConnection(
             `Provider ${pickedProvider} failed for ${label}, trying other provider.`,
             error,
           );
-          if (sharedLimiter && isRpcRateLimitError(error)) {
+          const providerOutcome = getRpcProviderOutcome(error);
+          if (sharedLimiter && providerOutcome) {
             try {
-              await sharedLimiter.recordProviderOutcome(pickedProvider, 'rate_limited');
+              await sharedLimiter.recordProviderOutcome(pickedProvider, providerOutcome as 'rate_limited');
             } catch (reportError) {
               logger.warn(`Failed to record provider outcome for ${pickedProvider}.`, reportError);
             }
@@ -2201,6 +2235,17 @@ export class LmMarketBot {
     if (this.loopTimer) {
       clearTimeout(this.loopTimer);
       this.loopTimer = null;
+    }
+    await this.closeSharedLimiterMetrics();
+  }
+
+  private async closeSharedLimiterMetrics(): Promise<void> {
+    const closeMetrics = (this.connection as ConnectionWithLimiterClose)[CLOSE_SHARED_LIMITER_METRICS];
+    if (typeof closeMetrics !== 'function') return;
+    try {
+      await closeMetrics(Date.now() + LIMITER_METRICS_SHUTDOWN_MAX_MS);
+    } catch (error) {
+      this.logger.warn(`Shared limiter metrics shutdown failed (non-fatal): ${getErrorText(error)}`);
     }
   }
 

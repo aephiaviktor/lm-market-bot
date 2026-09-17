@@ -81,11 +81,24 @@ function applyRpcLimiterSettings(state, input) {
     return { role, action: 'cleared' };
   }
 
+  // A provider's identity is its endpoint (rpcBaseUrl) plus its credential
+  // (apiKey). When the identity changed, stale quota-exhaustion knowledge no
+  // longer applies to this endpoint, so clear only this provider's persisted
+  // quotaExhaustedUntilMs. `null` is the shared limiter representation for
+  // "not known quota-exhausted". If the identity is unchanged (including
+  // re-applies from ordinary startup/settings synchronisation), the
+  // timestamp is preserved by the spread below.
+  const previous = state.providers[role];
+  const providerIdentityChanged =
+    previous.rpcBaseUrl !== parsedUrl.rpcBaseUrl
+    || previous.apiKey !== parsedUrl.apiKey;
+
   state.providers[role] = {
-    ...state.providers[role],
+    ...previous,
     ...parsedUrl,
     failures: 0,
     cooldownUntilMs: null,
+    ...(providerIdentityChanged ? { quotaExhaustedUntilMs: null } : {}),
   };
   state.buckets = state.buckets && typeof state.buckets === 'object' ? state.buckets : {};
   state.buckets['rpc:shared'] = {

@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.98",
+  "version": "0.2.99",
   "description": "Faction-neutral packaged desktop automation for Star Atlas local-market trading.",
   "main": "electron/main.js",
   "scripts": {
@@ -32,7 +32,7 @@
     "bs58": "^6.0.0",
     "electron-updater": "^6.8.9",
     "proper-lockfile": "^4.1.2",
-    "rpc_limiter": "git+https://github.com/aephiaviktor/rpc-limiter.git#main",
+    "rpc_limiter": "git+https://github.com/aephiaviktor/rpc-limiter.git#ff31cf85638ee1f4fe26fb687171165963c81abf",
     "semver": "^7.8.5"
   },
   "devDependencies": {
