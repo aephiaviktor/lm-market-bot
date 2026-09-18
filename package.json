@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.2.99",
+  "version": "0.3.0",
   "description": "Faction-neutral packaged desktop automation for Star Atlas local-market trading.",
   "main": "electron/main.js",
   "scripts": {
@@ -82,6 +82,13 @@
         "repo": "lm-market-bot",
         "releaseType": "draft"
       }
+    ],
+    "asarUnpack": [
+      "node_modules/rpc_limiter/**",
+      "node_modules/proper-lockfile/**",
+      "node_modules/graceful-fs/**",
+      "node_modules/retry/**",
+      "node_modules/signal-exit/**"
     ]
   }
 }

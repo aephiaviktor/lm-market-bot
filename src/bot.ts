@@ -936,6 +936,15 @@ type LocalMarketSellContextCacheEntry = {
   context: LocalMarketSellContext | null;
 };
 
+type LocalMarketBuyContext = {
+  certificateResource: ResourceConfig;
+};
+
+type LocalMarketBuyContextCacheEntry = {
+  expiresAt: number;
+  context: LocalMarketBuyContext | null;
+};
+
 type LocalMarketSellContext = {
   rawResource: ResourceConfig;
   certificateResource: ResourceConfig;
@@ -2072,6 +2081,7 @@ export class LmMarketBot {
   private readonly myOpenOrdersCache = new Map<string, MyOpenOrdersCacheEntry>();
   private readonly walletBalanceCache = new Map<string, ExpiringPromiseCacheEntry<number>>();
   private readonly localMarketSellContextCache = new Map<string, LocalMarketSellContextCacheEntry>();
+  private readonly localMarketBuyContextCache = new Map<string, LocalMarketBuyContextCacheEntry>();
   private readonly starbasePlayerCache = new Map<string, ExpiringPromiseCacheEntry<PublicKey | null>>();
   private readonly cargoPodCache = new Map<string, ExpiringPromiseCacheEntry<PublicKey[]>>();
   private readonly cargoPodTokenInventoryCache = new Map<string, CargoPodTokenInventoryCacheEntry>();
@@ -2179,6 +2189,7 @@ export class LmMarketBot {
     this.myOpenOrdersCache.clear();
     this.walletBalanceCache.clear();
     this.localMarketSellContextCache.clear();
+    this.localMarketBuyContextCache.clear();
     this.starbasePlayerCache.clear();
     this.cargoPodCache.clear();
     this.cargoPodTokenInventoryCache.clear();
@@ -2315,7 +2326,9 @@ export class LmMarketBot {
     const baseResource = resolveResourceForRule(rule);
     const localMarketContext = normalizedSide === 'sell'
       ? await this.resolveLocalMarketSellContext(rule, baseResource)
-      : null;
+      : normalizedSide === 'buy'
+        ? await this.resolveLocalMarketBuyContext(rule, baseResource)
+        : null;
     const resource = localMarketContext?.certificateResource ?? baseResource;
     const cancelledIds = new Set<string>();
 
@@ -3203,6 +3216,60 @@ export class LmMarketBot {
   private makeLocalMarketSellContextEntry(
     context: LocalMarketSellContext | null,
   ): LocalMarketSellContextCacheEntry {
+    return {
+      expiresAt: Date.now() + LOCAL_MARKET_SELL_CONTEXT_CACHE_TTL_MS,
+      context,
+    };
+  }
+
+  /**
+   * Resolve the starbase certificate resource for a BUY rule.
+   *
+   * Local-market buy orders must trade the starbase certificate mint, not the
+   * raw resource mint: the in-game starbase market displays (and fills) orders
+   * on the certificate mint book. Buyers do not need a starbase player, cargo
+   * pod, or profile-faction authority (those are only required to MINT
+   * certificates on the sell side), so this resolver is intentionally lighter
+   * than `resolveLocalMarketSellContext`.
+   */
+  private async resolveLocalMarketBuyContext(
+    rule: AssetRuleConfig,
+    rawResource: ResourceConfig,
+  ): Promise<LocalMarketBuyContext | null> {
+    const cacheKey = `${rule.starbase}:${rawResource.mint.toBase58()}`;
+    const cached = this.localMarketBuyContextCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.context;
+    }
+
+    const starbaseEntry = findStarbaseRegistryEntry(rule.starbase);
+    if (!starbaseEntry) {
+      this.localMarketBuyContextCache.set(cacheKey, this.makeLocalMarketBuyContextEntry(null));
+      return null;
+    }
+
+    const starbase = new PublicKey(starbaseEntry.publicKey);
+    const starbaseAccount = await this.sageProgram.account.starbase.fetch(starbase);
+    const certificateMint = findCertificateMintAddress(
+      this.sageProgram,
+      starbase,
+      rawResource.mint,
+      Number(starbaseAccount.seqId),
+    )[0];
+
+    const context: LocalMarketBuyContext = {
+      certificateResource: {
+        name: rawResource.name,
+        mint: certificateMint,
+      },
+    };
+    this.localMarketBuyContextCache.set(cacheKey, this.makeLocalMarketBuyContextEntry(context));
+    return context;
+  }
+
+  private makeLocalMarketBuyContextEntry(
+    context: LocalMarketBuyContext | null,
+  ): LocalMarketBuyContextCacheEntry {
     return {
       expiresAt: Date.now() + LOCAL_MARKET_SELL_CONTEXT_CACHE_TTL_MS,
       context,
@@ -4597,25 +4664,45 @@ export class LmMarketBot {
   ) {
     this.logger.info(`[${new Date().toISOString()}] Checking ${resource.name} buy market...`);
     const cancelledIds = new Set<string>();
-    const { allOrdersRaw, myOrdersRaw } = marketOrderSnapshot ?? (await this.readMarketOrderSnapshot(resource));
+    const localMarketContext = await this.resolveLocalMarketBuyContext(rule, resource);
+    const buyResource = localMarketContext?.certificateResource ?? resource;
+    const { allOrdersRaw, myOrdersRaw } =
+      marketOrderSnapshot && buyResource.mint.equals(resource.mint)
+        ? marketOrderSnapshot
+        : await this.readMarketOrderSnapshot(buyResource);
 
-    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(resource);
+    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(buyResource);
     const quoteSymbol = getQuoteSymbolForMint(quoteMint);
     const isShipMarket = quoteMint.equals(QUOTE_USDC_MINT);
     const allOrders = allOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint));
     const myOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint));
     const staleQuoteOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && !isOrderForQuoteMint(o, quoteMint));
 
+    const staleRawBookOrders = localMarketContext && !buyResource.mint.equals(resource.mint) && marketOrderSnapshot
+      ? marketOrderSnapshot.myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint))
+      : [];
+
     for (const staleOrder of staleQuoteOrders) {
+      await this.cancelOrder(staleOrder, buyResource, 'buy', cancelledIds);
+    }
+
+    for (const staleOrder of staleRawBookOrders) {
+      this.logger.info(`Cancelling raw-mint buy order ${staleOrder.id} for ${resource.name} (placed on the wrong book).`);
       await this.cancelOrder(staleOrder, resource, 'buy', cancelledIds);
     }
 
-    await this.detectFills(resource, 'buy', myOrders, cancelledIds);
+    await this.detectFills(buyResource, 'buy', myOrders, cancelledIds);
 
     const maxBuyQuantity = rule.quantity;
     const minBuyQuantity = rule.minQuantity;
     const maxBuyPrice = rule.price;
-    const inventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name);
+    const rawInventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name);
+    const certificateInventoryBalance = localMarketContext
+      ? await this.getWalletBalanceForMint(buyResource.mint, buyResource.name, {
+          tokenProgramId: TOKEN_2022_PROGRAM_ID,
+        })
+      : 0;
+    const inventoryBalance = rawInventoryBalance + certificateInventoryBalance;
     const remainingBuyAllowance = Math.max(0, Math.floor((rule.limit ?? Number.POSITIVE_INFINITY) - inventoryBalance));
     const possibleTargetQuantity = Math.min(maxBuyQuantity, remainingBuyAllowance);
     const targetQuantity = possibleTargetQuantity >= minBuyQuantity ? possibleTargetQuantity : 0;
@@ -4633,7 +4720,7 @@ export class LmMarketBot {
     const sortedMyOrders = [...myOrders].sort((a, b) => b.uiPrice - a.uiPrice);
     const activeOrder = sortedMyOrders[0];
     for (let i = 1; i < sortedMyOrders.length; i++) {
-      await this.cancelOrder(sortedMyOrders[i], resource, 'buy', cancelledIds);
+      await this.cancelOrder(sortedMyOrders[i], buyResource, 'buy', cancelledIds);
     }
 
     const quoteBalance = await this.getWalletBalanceForMint(quoteMint, quoteSymbol);
@@ -4672,7 +4759,7 @@ export class LmMarketBot {
         return;
       }
 
-      await this.placeOrder(resource, 'buy', targetPrice, targetQuantity, cancelledIds, quoteMint);
+      await this.placeOrder(buyResource, 'buy', targetPrice, targetQuantity, cancelledIds, quoteMint);
       return;
     }
 
@@ -4684,7 +4771,7 @@ export class LmMarketBot {
       this.logger.info(
         `Buy limit reached for ${resource.name}. Cancelling active buy order ${activeOrder.id} with remaining quantity ${activeQuantity}.`,
       );
-      await this.cancelOrder(activeOrder, resource, 'buy', cancelledIds);
+      await this.cancelOrder(activeOrder, buyResource, 'buy', cancelledIds);
       return;
     }
 
@@ -4731,8 +4818,8 @@ export class LmMarketBot {
       );
     }
 
-    await this.cancelOrder(activeOrder, resource, 'buy', cancelledIds);
-    await this.placeOrder(resource, 'buy', targetPrice, targetQuantity, new Set<string>(), quoteMint);
+    await this.cancelOrder(activeOrder, buyResource, 'buy', cancelledIds);
+    await this.placeOrder(buyResource, 'buy', targetPrice, targetQuantity, new Set<string>(), quoteMint);
   }
 
   private async processBuyRules(
@@ -4743,22 +4830,42 @@ export class LmMarketBot {
   ) {
     this.logger.info(`[${new Date().toISOString()}] Checking ${resource.name} buy market for ${rules.length} rules...`);
     const cancelledIds = new Set<string>();
-    const { allOrdersRaw, myOrdersRaw } = marketOrderSnapshot ?? (await this.readMarketOrderSnapshot(resource));
+    const firstRule = rules[0].rule;
+    const localMarketContext = await this.resolveLocalMarketBuyContext(firstRule, resource);
+    const buyResource = localMarketContext?.certificateResource ?? resource;
+    const { allOrdersRaw, myOrdersRaw } =
+      marketOrderSnapshot && buyResource.mint.equals(resource.mint)
+        ? marketOrderSnapshot
+        : await this.readMarketOrderSnapshot(buyResource);
 
-    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(resource);
+    const quoteMint = quoteMintOverride ?? getQuoteMintForResource(buyResource);
     const quoteSymbol = getQuoteSymbolForMint(quoteMint);
     const isShipMarket = quoteMint.equals(QUOTE_USDC_MINT);
     const allOrders = allOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint));
     const myOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint));
     const staleQuoteOrders = myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && !isOrderForQuoteMint(o, quoteMint));
+    const staleRawBookOrders = localMarketContext && !buyResource.mint.equals(resource.mint) && marketOrderSnapshot
+      ? marketOrderSnapshot.myOrdersRaw.filter((o) => o.orderType === OrderSide.Buy && isOrderForQuoteMint(o, quoteMint))
+      : [];
 
     for (const staleOrder of staleQuoteOrders) {
+      await this.cancelOrder(staleOrder, buyResource, 'buy', cancelledIds);
+    }
+
+    for (const staleOrder of staleRawBookOrders) {
+      this.logger.info(`Cancelling raw-mint buy order ${staleOrder.id} for ${resource.name} (placed on the wrong book).`);
       await this.cancelOrder(staleOrder, resource, 'buy', cancelledIds);
     }
 
-    await this.detectFills(resource, 'buy', myOrders, cancelledIds);
+    await this.detectFills(buyResource, 'buy', myOrders, cancelledIds);
 
-    const inventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name);
+    const rawInventoryBalance = await this.getWalletBalanceForMint(resource.mint, resource.name);
+    const certificateInventoryBalance = localMarketContext
+      ? await this.getWalletBalanceForMint(buyResource.mint, buyResource.name, {
+          tokenProgramId: TOKEN_2022_PROGRAM_ID,
+        })
+      : 0;
+    const inventoryBalance = rawInventoryBalance + certificateInventoryBalance;
     const desiredOrders: DesiredBuyOrder[] = [];
 
     for (const { index, rule } of rules) {
@@ -4847,7 +4954,7 @@ export class LmMarketBot {
       }
 
       this.logger.info(`Cancelling extra buy order ${order.id} for ${resource.name}.`);
-      await this.cancelOrder(order, resource, 'buy', cancelledIds);
+      await this.cancelOrder(order, buyResource, 'buy', cancelledIds);
       quoteBalance += order.uiPrice * getOrderRemainingQuantity(order);
     }
 
@@ -4859,7 +4966,7 @@ export class LmMarketBot {
           `Buy limit reached for ${resource.name} rule ${desired.ruleIndex}. Inventory ${inventoryBalance} is at or above limit ${desired.rule.limit}.`,
         );
         if (activeOrder) {
-          await this.cancelOrder(activeOrder, resource, 'buy', cancelledIds);
+          await this.cancelOrder(activeOrder, buyResource, 'buy', cancelledIds);
           quoteBalance += activeOrder.uiPrice * getOrderRemainingQuantity(activeOrder);
         }
         continue;
@@ -4912,11 +5019,11 @@ export class LmMarketBot {
           `Replacing buy order ${activeOrder.id} for rule ${desired.ruleIndex} with ` +
             `${desired.targetQuantity} ${resource.name} @ ${desired.targetPrice}.`,
         );
-        await this.cancelOrder(activeOrder, resource, 'buy', cancelledIds);
+        await this.cancelOrder(activeOrder, buyResource, 'buy', cancelledIds);
         quoteBalance += releasableQuoteFromActiveOrder;
       }
 
-      await this.placeOrder(resource, 'buy', desired.targetPrice, desired.targetQuantity, cancelledIds, quoteMint);
+      await this.placeOrder(buyResource, 'buy', desired.targetPrice, desired.targetQuantity, cancelledIds, quoteMint);
       quoteBalance -= requiredQuote;
     }
   }
@@ -5176,6 +5283,9 @@ export class LmMarketBot {
       if (rule.side === 'sell') {
         const context = await this.resolveLocalMarketSellContext(rule, rawResource);
         queryResource = context?.certificateResource ?? rawResource;
+      } else if (rule.side === 'buy') {
+        const context = await this.resolveLocalMarketBuyContext(rule, rawResource);
+        queryResource = context?.certificateResource ?? rawResource;
       }
 
       const key = `${normalizeStarbaseName(rule.starbase)}:${queryResource.mint.toBase58()}:${rule.side}`;
@@ -5207,7 +5317,8 @@ export class LmMarketBot {
 
           const buyRule = group.rules.find((item) => item.rule.side === 'buy')?.rule;
           if (buyRule) {
-            const mintKey = resource.mint.toBase58();
+            const buyContext = await this.resolveLocalMarketBuyContext(buyRule, resource);
+            const mintKey = (buyContext?.certificateResource ?? resource).mint.toBase58();
             const current = thresholds.get(mintKey) ?? { buy: 1, sell: 1 };
             current.buy = getRelevantOrderThreshold(buyRule.quantity, this.config.relevantBuyOrderPct);
             thresholds.set(mintKey, current);
