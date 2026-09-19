@@ -52,6 +52,7 @@ import {
 } from './asset-registry';
 import { findStarbaseRegistryEntry, normalizeStarbaseRegistryName } from './starbase-registry';
 import { appendBoundedJsonLine, readJsonlTail } from './reliability-policy';
+import { normalizeToken2022AtaReferences } from './token-account-policy';
 
 const GM_PROGRAM_ID = new PublicKey('traderDnaR5w6Tcoi3NFm53i48FTDNbGjBSZwWXDRrg');
 const COMPUTE_BUDGET_PROGRAM_ID = new PublicKey('ComputeBudget111111111111111111111111111111');
@@ -3602,53 +3603,11 @@ export class LmMarketBot {
   }
 
   private async normalizeAssociatedTokenAccountInstructions(transaction: Transaction): Promise<void> {
-    for (const instruction of transaction.instructions) {
-      if (!instruction.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID) || instruction.keys.length < 6) {
-        continue;
-      }
-
-      const ataKey = instruction.keys[1];
-      const owner = instruction.keys[2]?.pubkey;
-      const mint = instruction.keys[3]?.pubkey;
-      const tokenProgramKey = instruction.keys[5];
-      if (!ataKey || !owner || !mint || !tokenProgramKey) {
-        continue;
-      }
-
-      const mintAccount = await this.connection.getAccountInfo(mint, 'confirmed');
-      if (!mintAccount?.owner.equals(TOKEN_2022_PROGRAM_ID)) {
-        continue;
-      }
-
-      const expectedAta = await getAssociatedTokenAddress(
-        mint,
-        owner,
-        true,
-        TOKEN_2022_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID,
-      );
-      let changed = false;
-
-      if (!ataKey.pubkey.equals(expectedAta)) {
-        instruction.keys[1] = {
-          ...ataKey,
-          pubkey: expectedAta,
-        };
-        changed = true;
-      }
-
-      if (!tokenProgramKey.pubkey.equals(TOKEN_2022_PROGRAM_ID)) {
-        instruction.keys[5] = {
-          ...tokenProgramKey,
-          pubkey: TOKEN_2022_PROGRAM_ID,
-        };
-        changed = true;
-      }
-
-      if (changed) {
-        this.logger.info(`Using Token-2022 ATA ${expectedAta.toBase58()} for ${mint.toBase58()}.`);
-      }
-    }
+    await normalizeToken2022AtaReferences(
+      transaction,
+      async (mint) => (await this.connection.getAccountInfo(mint, 'confirmed'))?.owner ?? null,
+      (message) => this.logger.info(message),
+    );
   }
 
   private async cancelOrder(order: Order, resource: ResourceConfig, side: AssetRuleSide, cancelledIds: Set<string>): Promise<string> {
