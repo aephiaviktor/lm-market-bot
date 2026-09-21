@@ -4,6 +4,7 @@ const fs = require('fs/promises');
 const fsSync = require('fs');
 const { spawn } = require('node:child_process');
 const { installationIdentity, resolveInstallationProfile, updateFeed } = require('./installation-policy');
+const { developmentUpdate } = require('./development-update-source');
 const { autoUpdater } = require('electron-updater');
 const { determineReleaseAction } = require('./release-update-policy');
 const { consumeSatisfiedUpdateRestartRequest, getPackagedInstallDirectory, writeUpdateRestartRequest } = require('./update-restart-policy');
@@ -320,6 +321,8 @@ async function fetchLatestOfficialRelease() {
 }
 
 async function checkForUpdates() {
+  const development = developmentUpdate(packageJson);
+  if (development) return development;
   const latest = await fetchLatestOfficialRelease();
   const decision = determineReleaseAction(APP_VERSION, latest.version);
   return {
@@ -338,10 +341,10 @@ async function downloadUpdateAndRestart() {
   if (!update.updateAvailable) return { updated: false, currentVersion: update.currentVersion, latestVersion: update.latestVersion };
   if (!packageJson.installationProfile) throw new Error('This legacy shared package cannot update independently. Install the dedicated profile package first.');
   const installDirectory = getPackagedInstallDirectory(process.execPath);
-  autoUpdater.setFeedURL(updateFeed(packageJson.installationProfile, update.latestVersion));
+  autoUpdater.setFeedURL(update.feed || updateFeed(packageJson.installationProfile, update.latestVersion));
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.allowPrerelease = false;
+  autoUpdater.allowPrerelease = packageJson.developmentUpdateTest === true;
   autoUpdater.allowDowngrade = update.restoreOfficial;
   const progressHandler = (progress) => {
     const percent = Number.isFinite(progress?.percent) ? ` (${Math.floor(progress.percent)}%)` : '';

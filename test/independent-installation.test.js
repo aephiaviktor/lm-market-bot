@@ -29,7 +29,7 @@ test('runtime uses single-profile update with native installer relaunch, no cros
   assert.doesNotMatch(s,/buildSharedUpdateRequest|startSharedUpdateMonitor|launchPostInstallProfileRestart|restartScheduledProfileTasks/);
   assert.match(s,/requestSingleInstanceLock/);
   assert.match(s,/autoUpdater\.quitAndInstall\(true, true\)/);
-  assert.match(s,/autoUpdater\.setFeedURL\(updateFeed/);
+  assert.match(s,/autoUpdater\.setFeedURL\(update.feed \|\| updateFeed/);
 });
 test('builder configuration validates and uses actual builder cache naming', async () => {
   const { validateConfiguration } = require('app-builder-lib/out/util/config/config');
