@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { buildInstallerCompletionGate } = require('./installer-completion');
 
 const SHARED_UPDATE_REQUEST_FILE = 'shared-update-request.json';
 const SHARED_UPDATE_ACK_DIRECTORY = 'shared-update-acks';
@@ -144,12 +145,14 @@ function quotePowerShellLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function buildWindowsProfileRestartScript({ parentPid, executablePath, targetVersion, profiles }) {
+function buildWindowsProfileRestartScript({ parentPid, executablePath, targetVersion, profiles, handoffDirectory, maintenancePath, token }) {
   const pid = Number.parseInt(String(parentPid), 10);
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('A positive parent process id is required.');
   const executable = String(executablePath || '').trim();
   const version = String(targetVersion || '').trim();
   if (!executable || !version) throw new Error('Executable path and target version are required.');
+  if (handoffDirectory && (typeof token !== 'string' || !token)) throw new Error('A handoff token is required.');
+  if (maintenancePath && !handoffDirectory) throw new Error('Maintenance requires a handoff directory.');
   const normalizedProfiles = [...new Set((profiles || []).map(sanitizeRuntimeProfile))];
   if (!normalizedProfiles.length) throw new Error('At least one runtime profile is required.');
   return [
@@ -157,17 +160,57 @@ function buildWindowsProfileRestartScript({ parentPid, executablePath, targetVer
     `$parentPid = ${pid}`,
     `$executablePath = ${quotePowerShellLiteral(executable)}`,
     `$targetVersion = ${quotePowerShellLiteral(version)}`,
-    `Wait-Process -Id ${pid} -ErrorAction SilentlyContinue`,
+    ...(handoffDirectory ? [
+      `$handoff = ${quotePowerShellLiteral(handoffDirectory)}`,
+      `$token = ${quotePowerShellLiteral(token)}`,
+      '$log = Join-Path $handoff "restart.log"',
+      'function Log([string]$message) { Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + " " + $message) }',
+      '@{ token=$token } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $handoff "helper-started.json")',
+      '$authorizationDeadline = [DateTime]::UtcNow.AddSeconds(30)',
+      'while ($true) {',
+      '  $proceed = Join-Path $handoff "helper-proceed.json"',
+      '  if ((Test-Path $proceed) -and ((Get-Content -Raw $proceed | ConvertFrom-Json).token -eq $token)) { break }',
+      '  if ([DateTime]::UtcNow -ge $authorizationDeadline) { Log "Authorization timed out; no restart"; exit 1 }',
+      '  Start-Sleep -Milliseconds 100',
+      '}',
+      'try {',
+      'Log "Helper authorized; waiting for parent"',
+    ] : []),
+    `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { Wait-Process -Id ${pid} -Timeout 120 -ErrorAction Stop }`,
+    ...(handoffDirectory ? buildInstallerCompletionGate() : []),
     '$deadline = [DateTime]::UtcNow.AddMinutes(10)',
     'while ($true) {',
     '  if (Test-Path $executablePath) {',
     '    $installedVersion = (Get-Item $executablePath).VersionInfo.ProductVersion',
-    '    if ($installedVersion -and $installedVersion.StartsWith($targetVersion)) { break }',
+    '    if ($installedVersion -eq $targetVersion -or $installedVersion -eq ($targetVersion + ".0")) { break }',
     '  }',
-    '  if ([DateTime]::UtcNow -ge $deadline) { break }',
+    "  if ([DateTime]::UtcNow -ge $deadline) { throw 'Timed out waiting for installed version' }",
     '  Start-Sleep -Seconds 1',
     '}',
-    ...normalizedProfiles.map((profile) => `& schtasks.exe /Run /TN ${quotePowerShellLiteral(`LM Market Bot ${profile}`)}`),
+    ...(handoffDirectory ? ['Log "Installed version verified"'] : []),
+    ...(maintenancePath ? [
+      `$maintenance = ${quotePowerShellLiteral(maintenancePath)}`,
+      'if (-not (Test-Path $maintenance) -or ((Get-Content -Raw $maintenance | ConvertFrom-Json).token -ne $token)) { throw "Maintenance ownership lost; refusing restart" }',
+      'Remove-Item -LiteralPath $maintenance',
+    ] : []),
+    ...normalizedProfiles.flatMap((profile) => [
+      `& schtasks.exe /Run /TN ${quotePowerShellLiteral(`LM Market Bot ${profile}`)}`,
+      `if ($LASTEXITCODE -ne 0) { throw ${quotePowerShellLiteral(`Task restart failed for ${profile}`)} }`,
+      `$profilePattern = ${quotePowerShellLiteral(`--profile\\s+"?${profile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"?(?:\\s|$)`)}`,
+      '$readyDeadline = [DateTime]::UtcNow.AddSeconds(120)',
+      'while ($true) {',
+      '  $mains = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $executablePath -and $_.CommandLine -match $profilePattern -and $_.CommandLine -notmatch "--type=" })',
+      '  if ($mains.Count -gt 1) { throw "Duplicate profile main processes" }',
+      '  if ($mains.Count -eq 1) {',
+      '    $main = Get-Process -Id $mains[0].ProcessId -ErrorAction SilentlyContinue',
+      '    if ($main -and $main.MainWindowHandle -ne 0 -and $main.Responding) { break }',
+      '  }',
+      '  if ([DateTime]::UtcNow -ge $readyDeadline) { throw "Profile window readiness timeout" }',
+      '  Start-Sleep -Seconds 1',
+      '}',
+      ...(handoffDirectory ? [`Log ${quotePowerShellLiteral(`Responsive profile window: ${profile}`)}`] : []),
+    ]),
+    ...(handoffDirectory ? ['Log "All participating profile windows responsive (trading health not verified)"', '} catch { Log ("FAILED: " + $_.Exception.Message); exit 1 }'] : []),
   ].join('\r\n');
 }
 

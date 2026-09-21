@@ -13,7 +13,7 @@
     "dev:cli": "ts-node src/index.ts",
     "start:electron": "npm run build && electron .",
     "dev": "npm run start:electron",
-    "dist:win": "npm run build && electron-builder --win nsis --publish never"
+    "dist:win": "npm run build && node scripts/build-independent.js"
   },
   "keywords": [],
   "author": "Aephia",
@@ -56,7 +56,11 @@
       "electron/**/*",
       "assets/**/*",
       "package.json",
-      "!electron/update-policy.js"
+      "!electron/update-policy.js",
+      "!electron/shared-update-policy.js",
+      "!electron/update-handshake.js",
+      "!electron/installer-completion.js",
+      "!electron/installer.nsh"
     ],
     "win": {
       "target": [
@@ -75,14 +79,6 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "aephiaviktor",
-        "repo": "lm-market-bot",
-        "releaseType": "draft"
-      }
-    ],
     "asarUnpack": [
       "node_modules/rpc_limiter/**",
       "node_modules/proper-lockfile/**",

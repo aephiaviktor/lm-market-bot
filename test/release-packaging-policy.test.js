@@ -10,16 +10,12 @@ test('LM Market Bot uses packaged GitHub Release updates rather than main-branch
   assert.match(main, /releases\/latest/);
   assert.match(main, /autoUpdater\.checkForUpdates\(\)/);
   assert.match(main, /autoUpdater\.downloadUpdate\(\)/);
-  assert.match(main, /autoUpdater\.quitAndInstall\(true, false\)/);
-  assert.match(main, /buildSharedUpdateRequest/);
-  assert.match(main, /listRuntimeRegistrations/);
-  assert.match(main, /acknowledgeSharedUpdate/);
-  assert.match(main, /buildWindowsProfileRestartScript/);
+  assert.match(main, /autoUpdater\.quitAndInstall\(true, true\)/);
   assert.doesNotMatch(main, /raw\.githubusercontent\.com/);
   assert.doesNotMatch(main, /archive\/refs\/heads\/main\.tar\.gz/);
 });
 
-test('one neutral Windows package serves every runtime profile', () => {
+test('neutral base configuration is specialized into dedicated Windows packages', () => {
   const p = require('../package.json');
   assert.equal(p.build.appId, 'com.aephia.lm-market-bot');
   assert.equal(p.build.productName, 'LM Market Bot');
@@ -34,17 +30,15 @@ test('one neutral Windows package serves every runtime profile', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/windows-release.yml'), 'utf8');
   assert.match(workflow, /push:\s*\n\s*tags:/);
   assert.match(workflow, /npm run dist:win/);
-  assert.match(workflow, /LM-Market-Bot-Setup-\$version\.exe/);
-  assert.match(workflow, /latest\.yml/);
-  assert.doesNotMatch(workflow, /MUD|ONI|USTUR/i);
+  assert.match(workflow, /LM-Market-Bot-\$profile-Setup-\$version\.exe/);
+  assert.match(workflow, /\$slug\.yml/);
+  assert.match(workflow, /MUD.*ONI.*USTUR/);
 });
 
-test('packaged profiles share one installation while keeping persistent data isolated', () => {
+test('packaged profiles preserve existing persistent data paths', () => {
   const main = fs.readFileSync(path.join(root, 'electron/main.js'), 'utf8');
   assert.match(main, /path\.join\(app\.getPath\('appData'\), 'lm-market-bot'\)/);
   assert.match(main, /profiles', _profileName/);
   assert.match(main, /inferPackagedProfileName/);
-  assert.match(main, /registerRuntime\(BASE_USER_DATA/);
-  assert.match(main, /startSharedUpdateMonitor/);
   assert.doesNotMatch(main, /Release updates are available.*MUD|Release updates are available.*ONI|Release updates are available.*USTUR/);
 });

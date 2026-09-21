@@ -20,6 +20,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Test supervisor reattachment without launching applications
+        shell: powershell
+        run: ./test/windows-supervisor-reattach.ps1
       - name: Build Windows package without publishing
         run: npm run dist:win
       - name: Create deterministic draft Release
@@ -34,11 +37,13 @@ jobs:
             throw "Tag $($env:GITHUB_REF_NAME) does not match package version $version."
           }
 
-          $assets = @(
-            "release/LM-Market-Bot-Setup-$version.exe",
-            "release/LM-Market-Bot-Setup-$version.exe.blockmap",
-            "release/latest.yml"
-          )
+          $assets = @()
+          foreach ($profile in @('MUD', 'ONI', 'USTUR')) {
+            $slug = $profile.ToLowerInvariant()
+            $assets += "release/$slug/LM-Market-Bot-$profile-Setup-$version.exe"
+            $assets += "release/$slug/LM-Market-Bot-$profile-Setup-$version.exe.blockmap"
+            $assets += "release/$slug/$slug.yml"
+          }
           foreach ($asset in $assets) {
             if (-not (Test-Path $asset -PathType Leaf)) { throw "Required Release asset is missing: $asset" }
           }
@@ -64,6 +69,6 @@ jobs:
         with:
           name: lm-market-bot-windows-${{ github.ref_name }}
           path: |
-            release/*.exe
-            release/*.yml
-            release/*.blockmap
+            release/**/*.exe
+            release/**/*.yml
+            release/**/*.blockmap
