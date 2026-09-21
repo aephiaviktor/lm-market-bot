@@ -4,7 +4,7 @@ function buildConfiguration(profile) {
   const id = installationIdentity(profile);
   const base = structuredClone(require('../package.json').build);
   delete base.nsis.include;
-  return { ...base, appId: id.appId, productName: id.productName,
+  return { ...base, files: [...base.files, '!electron/development-update-source.js'], appId: id.appId, productName: id.productName,
     artifactName: `LM-Market-Bot-${id.profile}-Setup-\${version}.\${ext}`,
     directories: { ...base.directories, output: `release/${id.slug}` },
     extraMetadata: { name: id.name, installationProfile: id.profile },

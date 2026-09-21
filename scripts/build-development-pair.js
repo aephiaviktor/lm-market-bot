@@ -2,6 +2,7 @@
 const {build,Platform,Arch}=require('electron-builder');
 const {buildConfiguration}=require('./independent-build-config');
 async function main(){
+ throw new Error('Historical test harness: use commit dad0406; production routing has been removed.');
  for(const version of ['0.3.3-test.3','0.3.3-test.4']){
   const config=buildConfiguration('MUD');
   config.extraMetadata={...config.extraMetadata,version,developmentUpdateTest:true};
