@@ -1,6 +1,6 @@
 {
   "name": "lm-market-bot",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Faction-neutral packaged desktop automation for Star Atlas local-market trading.",
   "main": "electron/main.js",
   "scripts": {

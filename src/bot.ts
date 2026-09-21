@@ -892,6 +892,25 @@ export type TrackedOrderTransition =
   | { kind: 'full-fill'; filledDelta: number; remaining: 0 }
   | null;
 
+export function getCertificateSnapshotRules<
+  T extends Pick<AssetRuleConfig, 'asset' | 'starbase'>,
+>(rules: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return rules.filter((rule) => {
+    const key = `${rule.starbase}\0${rule.asset}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function findCertificateRedemptionRule<
+  T extends Pick<AssetRuleConfig, 'asset' | 'starbase'>,
+>(rules: readonly T[], asset: string, starbase: string): T | undefined {
+  return rules.find((rule) =>
+    rule.asset === asset && (!starbase || rule.starbase === starbase));
+}
+
 export function classifyTrackedOrderTransition(
   previous: OrderSnapshot,
   currentRemaining: number | null,
@@ -2423,31 +2442,34 @@ export class LmMarketBot {
     const seen = new Set<string>();
     const rows: BotCertificateStatus[] = [];
 
-    for (const rule of this.config.assetRules) {
-      if (rule.side !== 'sell') {
-        continue;
-      }
-
+    for (const rule of getCertificateSnapshotRules(this.config.assetRules)) {
       const rawResource = resolveResourceForRule(rule);
-      const context = await this.resolveLocalMarketSellContext(rule, rawResource);
+      const context = await this.resolveLocalMarketBuyContext(rule, rawResource);
       if (!context) {
         continue;
       }
 
-      const certificateMint = context.certificateMint.toBase58();
+      const certificateMintKey = context.certificateResource.mint;
+      const certificateMint = certificateMintKey.toBase58();
       if (seen.has(certificateMint)) {
         continue;
       }
       seen.add(certificateMint);
 
+      const certificateTokenAccount = await getAssociatedTokenAddress(
+        certificateMintKey,
+        this.wallet.publicKey,
+        false,
+        TOKEN_2022_PROGRAM_ID,
+      );
       rows.push({
         starbase: rule.starbase,
         asset: getResourceLabel(rawResource),
         ruleAsset: rule.asset,
         rawMint: rawResource.mint.toBase58(),
         certificateMint,
-        certificateTokenAccount: context.certificateTokenAccount.toBase58(),
-        balance: await this.getWalletBalanceForMint(context.certificateMint, rawResource.name, {
+        certificateTokenAccount: certificateTokenAccount.toBase58(),
+        balance: await this.getWalletBalanceForMint(certificateMintKey, rawResource.name, {
           tokenProgramId: TOKEN_2022_PROGRAM_ID,
         }),
       });
@@ -5420,12 +5442,11 @@ export class LmMarketBot {
       return { ok: false, status: 'invalid_request', asset: normalizedAsset, starbase: normalizedStarbase };
     }
 
-    const rule = this.config.assetRules.find((candidate) => {
-      if (candidate.side !== 'sell' || candidate.asset !== normalizedAsset) {
-        return false;
-      }
-      return !normalizedStarbase || candidate.starbase === normalizedStarbase;
-    });
+    const rule = findCertificateRedemptionRule(
+      this.config.assetRules,
+      normalizedAsset,
+      normalizedStarbase,
+    );
 
     if (!rule) {
       return { ok: false, status: 'rule_not_found', asset: normalizedAsset, starbase: normalizedStarbase };
