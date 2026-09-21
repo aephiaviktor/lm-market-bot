@@ -67,7 +67,7 @@ jobs:
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: lm-market-bot-windows-${{ github.ref_name }}
+          name: lm-market-bot-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             release/**/*.exe
             release/**/*.yml
